@@ -704,7 +704,7 @@ pub fn multicore_mode(
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
-                        println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                        println!("[FUZZ_FINDING] summary:{}", msg);
                         eprintln!("[FUZZ_FINDING] {}", msg);
                         crucible_test_context::print_action_sequence();
                         let input_hash = hash_std(slice);

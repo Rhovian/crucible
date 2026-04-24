@@ -38,6 +38,7 @@ arbitrary = {{ version = "1", features = ["derive"] }}
 anyhow = "1.0"
 bytemuck = "1.14"
 ctor = "0.6"
+ctrlc = "3.4"
 
 [[bin]]
 name = "invariant_test"

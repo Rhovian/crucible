@@ -1100,7 +1100,7 @@ fn stateful_singlecore_body(
                 );
                 if state_pool.is_novel_crash(input_hash) {
                     crashes_found += 1;
-                    println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                    println!("[FUZZ_FINDING] summary:{}", msg);
                     eprintln!("\n[FUZZ_FINDING] at iteration {}: {}", iteration, msg);
                     // Print full action chain from root to violation.
                     // Include ALL actions from the current chain (chain_len may be >1 with splice).
@@ -1858,7 +1858,7 @@ fn stateful_multicore_body(
                             // Crash disk I/O outside write lock (Fix 3)
                             for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
                                 let total = parent_descs.len() + current_descs.len();
-                                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                                println!("[FUZZ_FINDING] summary:{}", msg);
                                 eprintln!("\n[FUZZ_FINDING] {}", msg);
                                 eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                                 for (i, desc) in parent_descs.iter().enumerate() {
@@ -2475,7 +2475,7 @@ fn stateful_multicore_body(
                     // Crash disk I/O outside write lock (Fix 3)
                     for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
                         let total = parent_descs.len() + current_descs.len();
-                        println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                        println!("[FUZZ_FINDING] summary:{}", msg);
                         eprintln!("\n[FUZZ_FINDING] {}", msg);
                         eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                         for (i, desc) in parent_descs.iter().enumerate() {
