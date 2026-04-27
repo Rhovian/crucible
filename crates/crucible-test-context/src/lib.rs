@@ -182,13 +182,21 @@ fn slow_init() -> bool {
         if let Some(parent) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(k) = std::env::var("FUZZ_SLOW_K_SIGMA").and_then(|s| s.parse::<f64>().map_err(|_| std::env::VarError::NotPresent)) {
+        if let Ok(k) = std::env::var("FUZZ_SLOW_K_SIGMA")
+            .and_then(|s| s.parse::<f64>().map_err(|_| std::env::VarError::NotPresent))
+        {
             SLOW_K_SIGMA.with(|c| c.set(k));
         }
-        if let Ok(w) = std::env::var("FUZZ_SLOW_WARMUP").and_then(|s| s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent)) {
+        if let Ok(w) = std::env::var("FUZZ_SLOW_WARMUP")
+            .and_then(|s| s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent))
+        {
             SLOW_WARMUP.with(|c| c.set(w));
         }
-        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             Ok(f) => {
                 SLOW_LOG.with(|cell| *cell.borrow_mut() = Some(f));
                 true
@@ -259,8 +267,7 @@ pub fn maybe_record_slow_tx(elapsed_us: u128, label: &str) {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
