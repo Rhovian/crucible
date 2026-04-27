@@ -242,14 +242,15 @@ fn test_stateful_multicore_uses_iter_fixture() {
 
 #[test]
 fn test_no_tracing_switch_handles_all_contexts() {
-    // contexts_no_tracing_switch must re-snapshot and re-swap ALL contexts
-    // when switching from tracing to no-tracing mode.
+    // contexts_no_tracing_switch must rebuild pristine SVMs for ALL contexts
+    // (from each context's existing template snapshot) when switching from
+    // tracing to no-tracing mode.
     let src = read_macro_src("codegen.rs");
 
     let body = extract_fn_body(&src, "fn contexts_no_tracing_switch(");
     assert!(
-        body.contains("take_snapshot") && body.contains("__pristine_svm_"),
-        "no_tracing_switch should re-snapshot and update pristine SVMs for all contexts",
+        body.contains("__pristine_svm_") && body.contains("restore_full"),
+        "no_tracing_switch should rebuild pristine SVMs from template snapshots for all contexts",
     );
     // Should NOT skip any contexts
     assert!(

@@ -19,7 +19,7 @@ crucible run <project_name> <test_name> --release  # Optimized
 
 crucible run <project_name> <test_name> --timeout 60  # Stop after 60 seconds
 
-crucible run <project_name> <test_name> --release --coverage --timeout 120
+crucible run <project_name> <test_name> --release --cores 8  # 8 parallel fuzzer workers (-j 8 also works)
 
 crucible run <project_name> <test_name> --release --stateful  # Stateful mode (single action per iter with state pool)
 ```

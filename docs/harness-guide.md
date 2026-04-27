@@ -164,7 +164,6 @@ When a harness isn't working:
 Different program types have different coverage profiles:
 - **AMM/DEX** (Whirlpool, Raydium): ~2000-3000 edges
 - **Lending** (Marginfi, Kamino): ~2000-4000 edges
-- **Governance/Simple**: ~500-1500 edges
 
 ---
 

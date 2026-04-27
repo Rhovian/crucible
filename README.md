@@ -53,7 +53,7 @@ cargo install --path crates/crucible-fuzz-cli
 crucible init <program_name>
 ```
 
-Defaults to `fuzz/<program_name>/`; pass `-C <dir>` to create or use a harness somewhere else.
+Defaults to `fuzz/<program_name>/`
 
 ### Run a fuzz test
 
@@ -75,6 +75,12 @@ crucible run <program_name> <test_name> --release
 | [Crash Analysis](docs/crash-analysis.md) | Listing, viewing, replaying, and minimizing crashes |
 | [Coverage Reports](docs/coverage.md) | Bytecode & source-level coverage, LCOV, genhtml |
 | [Harness Guide](docs/harness-guide.md) | In-depth guide to writing effective fuzz harnesses |
+
+---
+
+## License
+
+Licensed under the [MIT License](LICENSE).
 
 ---
 
