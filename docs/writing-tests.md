@@ -92,12 +92,12 @@ pub fn action_stake(
 
 ---
 
-## Simple Fuzzing (`#[anchor_fuzz]`)
+## Simple Fuzzing (`#[crucible_fuzz]`)
 
 For testing individual operations with random inputs:
 
 ```rust
-#[anchor_fuzz]
+#[crucible_fuzz]
 fn fuzz_stake(fixture: &mut StakingFixture, #[range(0..100_000)] amount: u64) {
     fixture.action_stake(0, amount);
     let user = fixture.ctx.read_anchor_account::<User>(&fixture.user_pda).unwrap();

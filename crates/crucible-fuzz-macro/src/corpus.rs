@@ -67,7 +67,7 @@ pub fn cmin_mode(
             }
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             let template_fixture = #fixture_name::setup();

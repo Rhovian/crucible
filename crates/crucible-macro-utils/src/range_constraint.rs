@@ -201,7 +201,7 @@ impl RangeConstraint {
 
     /// Generate constraint code for a local variable: `param = start + (param % range_size)`
     ///
-    /// Used by `#[anchor_fuzz]` where parameters are local variables (not struct fields).
+    /// Used by `#[crucible_fuzz]` where parameters are local variables (not struct fields).
     pub fn generate_local_constraint(
         &self,
         param_name: &syn::Ident,

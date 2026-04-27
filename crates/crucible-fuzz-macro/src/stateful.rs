@@ -1,4 +1,4 @@
-//! ItyFuzz-style stateful fuzzing mode for the anchor-fuzz macro.
+//! Stateful fuzzing mode for the crucible-fuzz macro.
 //!
 //! Instead of executing full action sequences per iteration, this mode:
 //! 1. Maintains a pool of saved SVM states (snapshots)
@@ -80,14 +80,14 @@ pub fn stateful_mode(
     );
 
     quote! {
-        // === STATEFUL FUZZING MODE (ItyFuzz-style) ===
+        // === STATEFUL FUZZING MODE ===
         if std::env::var("FUZZ_STATEFUL").is_ok() {
             use crucible_test_context::snapshot::{
                 StatePool, SvmSnapshot, CompactDelta, compute_state_fingerprint_from_snapshot,
             };
             use libafl_bolts::rands::{Rand, StdRand};
 
-            eprintln!("[STATEFUL] ItyFuzz-style stateful fuzzing mode");
+            eprintln!("[STATEFUL] Stateful fuzzing mode");
 
             // Parse pool capacity from env or default to 10_000.
             // Smaller pools focus exploration: each state gets picked more often,
@@ -798,7 +798,12 @@ fn stateful_singlecore_body(
                             #mod_name::write_lcov_coverage("coverage.lcov");
                         }
                         if let Some(ref __corpus_out_path) = corpus_out_dir {
-                            match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
+                            // Context-free edge count for accurate diagnostic (singlecore).
+                            let __true_edges = {
+                                let __s = #mod_name::COVERAGE_STATE.lock().unwrap();
+                                __s.total_edges
+                            };
+                            match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref(), Some(__true_edges)) {
                                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
                             }
@@ -1524,7 +1529,12 @@ fn stateful_singlecore_body(
 
         // Loop exited (all active states exhausted or signal)
         if let Some(ref __corpus_out_path) = corpus_out_dir {
-            match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
+            // Context-free edge count for accurate diagnostic (singlecore).
+            let __true_edges = {
+                let __s = #mod_name::COVERAGE_STATE.lock().unwrap();
+                __s.total_edges
+            };
+            match state_pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref(), Some(__true_edges)) {
                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
             }
@@ -3172,8 +3182,14 @@ fn stateful_multicore_body(
         }
 
         if let Some(ref __corpus_out_path) = corpus_out_dir {
+            // Context-free edge count for accurate diagnostic (multicore).
+            // count_shared_bits is a popcount over a ~32KB bitmap — microseconds.
+            let __true_edges = #mod_name::FuzzCallback::count_shared_bits(
+                shared_edge_addr as *const u8,
+                #mod_name::SHARED_EDGE_BITMAP_SIZE / 2,
+            );
             let pool = state_pool.read().unwrap();
-            match pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref()) {
+            match pool.export_corpus(__corpus_out_path, corpus_in_dir.as_deref(), Some(__true_edges)) {
                 Ok(n) => eprintln!("[STATEFUL] Saved {} corpus entries to {}", n, __corpus_out_path),
                 Err(e) => eprintln!("[STATEFUL] Failed to save corpus: {}", e),
             }

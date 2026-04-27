@@ -1,4 +1,4 @@
-//! Execution modes for the anchor-fuzz macro.
+//! Execution modes for the crucible-fuzz macro.
 //!
 //! This module contains code generation for different execution modes:
 //! - Dry-run mode: Validate harness setup with a single iteration
@@ -44,7 +44,7 @@ pub fn dry_run_mode(
             eprintln!("[DRY-RUN] Validating harness setup...");
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             let template_fixture = #fixture_name::setup();
@@ -202,7 +202,7 @@ pub fn replay_mode(
             eprintln!("[REPLAY] Input size: {} bytes", input_bytes.len());
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             let template_fixture = #fixture_name::setup();
@@ -310,7 +310,7 @@ pub fn coverage_only_mode(
             }
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             #mod_name::COVERAGE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);

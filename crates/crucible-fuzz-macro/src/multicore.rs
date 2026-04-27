@@ -88,7 +88,7 @@ pub fn multicore_mode(
             // PRE-FORK: Initialize PROGRAM_TOTALS for coverage tracking
             // =====================================================================
             // Always enable tracing for pre-fork fixture (coverage totals init)
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
             let template_fixture = #fixture_name::setup();
             #init_coverage_totals
 
@@ -480,7 +480,7 @@ pub fn multicore_mode(
                 //
                 // Always enable tracing so corpus loading establishes coverage baseline.
                 // If --no-tracing, we switch to non-instrumented SVM after corpus loading.
-                std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+                std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
                 let template_fixture = template_fixture.clone();
 
                 // Take snapshot of initial SVM state for all contexts
@@ -634,10 +634,12 @@ pub fn multicore_mode(
                     let ok_before = crucible_test_context::TOTAL_ACTIONS_SUCCEEDED
                         .load(std::sync::atomic::Ordering::Relaxed);
 
-                    // Wrap test function in catch_unwind so panics print location and exit cleanly
+                    let __input_bytes_for_slow = input.target_bytes();
+                    crucible_test_context::set_current_input_bytes(__input_bytes_for_slow.as_slice());
                     let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         #fn_name(#(#call_args),*);
                     }));
+                    crucible_test_context::clear_current_input_bytes();
 
                     // Collect success pattern from action history for SuccessPatternFeedback
                     {

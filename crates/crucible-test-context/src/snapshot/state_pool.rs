@@ -1,10 +1,10 @@
 use crate::{FastHashMap, FastHashSet};
-use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use rustc_hash::FxHasher;
 
-use super::svm_snapshot::{CompactDelta, SvmSnapshot, FINGERPRINT_BITS};
+use super::svm_snapshot::{SvmSnapshot, CompactDelta, FINGERPRINT_BITS};
 
 // ============================================================================
 // Memory profiling
@@ -112,10 +112,7 @@ impl FingerprintBitmap {
             v.push(AtomicU8::new(0));
         }
         Self {
-            bits: v
-                .into_boxed_slice()
-                .try_into()
-                .unwrap_or_else(|_| unreachable!()),
+            bits: v.into_boxed_slice().try_into().unwrap_or_else(|_| unreachable!()),
         }
     }
 
@@ -137,6 +134,7 @@ impl FingerprintBitmap {
         let bit_idx = key % 8;
         self.bits[byte_idx].fetch_or(1 << bit_idx, Ordering::Relaxed);
     }
+
 }
 
 /// A single saved state in the state pool.
@@ -404,9 +402,7 @@ pub struct StateRegistry {
 
 impl StateRegistry {
     pub fn new() -> Self {
-        Self {
-            map: FastHashMap::default(),
-        }
+        Self { map: FastHashMap::default() }
     }
 
     /// Number of state classes tracked.
@@ -420,9 +416,7 @@ impl StateRegistry {
     }
 
     fn get_or_insert(&mut self, state_class: u16, depth: u32) -> &mut StateStats {
-        self.map
-            .entry(state_class)
-            .or_insert_with(|| StateStats::new(depth))
+        self.map.entry(state_class).or_insert_with(|| StateStats::new(depth))
     }
 
     /// Record that a new pool entry was added with this state_class.
@@ -481,8 +475,8 @@ impl StateRegistry {
             * (stats.out_transitions as f64 + 1.0);
 
         // Denominator: log-log penalty for saturated/over-selected states
-        let denominator =
-            (stats.trigger_count as f64 + 2.0).ln().max(1.0) * (stats.select_count as f64 + 2.0);
+        let denominator = (stats.trigger_count as f64 + 2.0).ln().max(1.0)
+            * (stats.select_count as f64 + 2.0);
 
         let base = numerator / denominator;
 
@@ -510,7 +504,7 @@ pub fn extract_coverage_positions(map: &[u8]) -> Vec<u16> {
     let mut positions = Vec::with_capacity(512);
     let mut i = 0usize;
     while i + 8 <= map.len() {
-        let chunk = u64::from_ne_bytes(map[i..i + 8].try_into().unwrap());
+        let chunk = u64::from_ne_bytes(map[i..i+8].try_into().unwrap());
         if chunk != 0 {
             for j in 0..8 {
                 if map[i + j] != 0 {
@@ -522,9 +516,7 @@ pub fn extract_coverage_positions(map: &[u8]) -> Vec<u16> {
     }
     // Handle trailing bytes
     while i < map.len() {
-        if map[i] != 0 {
-            positions.push(i as u16);
-        }
+        if map[i] != 0 { positions.push(i as u16); }
         i += 1;
     }
     positions
@@ -534,7 +526,7 @@ pub fn extract_coverage_positions(map: &[u8]) -> Vec<u16> {
 // StatePool — bounded pool of saved SVM states for stateful fuzzing
 // ============================================================================
 
-/// Bounded pool of saved SVM states for ItyFuzz-style stateful fuzzing.
+/// Bounded pool of saved SVM states for stateful fuzzing.
 ///
 /// States are deduplicated by fingerprint. The pool has a configurable capacity
 /// and memory limit.
@@ -625,9 +617,7 @@ impl StatePool {
         variants.push(self_variant);
         let mut cur_idx = parent_idx;
         while let Some(idx) = cur_idx {
-            if idx >= self.states.len() {
-                break;
-            }
+            if idx >= self.states.len() { break; }
             match self.states[idx].action_variant {
                 Some(v) => {
                     variants.push(v);
@@ -644,11 +634,7 @@ impl StatePool {
         h.finish()
     }
 
-    fn compute_ngram_keys(
-        &self,
-        action_variant: Option<u16>,
-        parent_idx: Option<usize>,
-    ) -> [u64; 3] {
+    fn compute_ngram_keys(&self, action_variant: Option<u16>, parent_idx: Option<usize>) -> [u64; 3] {
         let self_variant = match action_variant {
             Some(v) => v,
             None => return [0; 3],
@@ -708,9 +694,7 @@ impl StatePool {
         let mut max_rarity = 1.0_f64;
 
         for (level, &key) in keys.iter().enumerate() {
-            if key == 0 {
-                continue;
-            }
+            if key == 0 { continue; }
 
             let freq_map = &self.ngram_freq[level];
             let count = freq_map.get(&key).copied().unwrap_or(1) as f64;
@@ -723,9 +707,9 @@ impl StatePool {
 
             let ratio = max_freq / count;
             let rarity = match level {
-                0 => ratio.powf(0.4), // 2-gram: dampened
-                1 => ratio.powf(0.5), // 3-gram: moderate
-                _ => ratio.powf(0.6), // 4-gram: strongest signal
+                0 => ratio.powf(0.4),    // 2-gram: dampened
+                1 => ratio.powf(0.5),    // 3-gram: moderate
+                _ => ratio.powf(0.6),    // 4-gram: strongest signal
             };
 
             max_rarity = max_rarity.max(rarity);
@@ -759,14 +743,12 @@ impl StatePool {
             if let Some(evict_pos) = self.find_weakest_active() {
                 let evict_idx = self.active_indices[evict_pos];
                 self.active_indices.swap_remove(evict_pos);
-                let evict_dedup =
-                    self.states[evict_idx].fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
+                let evict_dedup = self.states[evict_idx].fingerprint & ((1u64 << FINGERPRINT_BITS) - 1);
                 self.seen.remove(&evict_dedup);
                 // Decrement edge frequency for evicted state
                 if let Some(ref positions) = self.states[evict_idx].edge_positions {
                     for &pos in positions.iter() {
-                        self.edge_freq[pos as usize] =
-                            self.edge_freq[pos as usize].saturating_sub(1);
+                        self.edge_freq[pos as usize] = self.edge_freq[pos as usize].saturating_sub(1);
                     }
                 }
                 // Decrement n-gram frequencies
@@ -838,11 +820,9 @@ impl StatePool {
         let (rarity_score, edge_positions) = if let Some(positions) = coverage_positions {
             if !positions.is_empty() && novelty_bits > 0 {
                 // Mean inverse frequency: rare edges → higher score
-                let score: f64 = positions
-                    .iter()
+                let score: f64 = positions.iter()
                     .map(|&pos| 1.0 / (self.edge_freq[pos as usize] as f64 + 1.0))
-                    .sum::<f64>()
-                    / positions.len() as f64;
+                    .sum::<f64>() / positions.len() as f64;
                 (score, Some(Arc::new(positions)))
             } else {
                 (0.0, None)
@@ -936,8 +916,7 @@ impl StatePool {
                 if child_sc != parent_sc {
                     self.registry.record_out_transition(parent_sc);
                 }
-                self.registry
-                    .record_new_find(parent_sc, self.current_iteration);
+                self.registry.record_new_find(parent_sc, self.current_iteration);
             }
         }
 
@@ -973,12 +952,7 @@ impl StatePool {
 
     /// Sample one state from a pre-built weight distribution. O(log n).
     /// Does NOT increment pick_count or total_picks.
-    pub fn sample_from_distribution(
-        &self,
-        cumulative: &[f64],
-        total: f64,
-        rand_val: u64,
-    ) -> Option<usize> {
+    pub fn sample_from_distribution(&self, cumulative: &[f64], total: f64, rand_val: u64) -> Option<usize> {
         if cumulative.is_empty() || total <= 0.0 {
             return self.pick_random(rand_val);
         }
@@ -1109,47 +1083,24 @@ impl StatePool {
                 let explore_decay = 1.0 / (1.0 + picks / 200.0);
                 match self.phase {
                     FuzzPhase::Coverage => {
-                        return depth_bonus
-                            * child_bonus
-                            * explore_decay
-                            * ngram_rarity
-                            * barren_decay
-                            * success_boost
-                            * depth_factor;
+                        return depth_bonus * child_bonus * explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
                     }
                     FuzzPhase::Blended => {
                         let sc = state_class_from_fingerprint(s.fingerprint);
-                        let scfuzz = self
-                            .registry
-                            .state_seed_weight(sc, picks, s.action_succeeded);
+                        let scfuzz = self.registry.state_seed_weight(sc, picks, s.action_succeeded);
                         let base = scfuzz.max(depth_bonus * explore_decay);
-                        return base
-                            * child_bonus
-                            * ngram_rarity
-                            * barren_decay
-                            * success_boost
-                            * depth_factor;
+                        return base * child_bonus * ngram_rarity * barren_decay * success_boost * depth_factor;
                     }
                 }
             }
             match self.phase {
                 FuzzPhase::Coverage => {
                     let explore_decay = 1.0 / (1.0 + picks / 50.0);
-                    return explore_decay
-                        * ngram_rarity
-                        * barren_decay
-                        * success_boost
-                        * depth_factor;
+                    return explore_decay * ngram_rarity * barren_decay * success_boost * depth_factor;
                 }
                 FuzzPhase::Blended => {
                     let sc = state_class_from_fingerprint(s.fingerprint);
-                    return self
-                        .registry
-                        .state_seed_weight(sc, picks, s.action_succeeded)
-                        * ngram_rarity
-                        * barren_decay
-                        * success_boost
-                        * depth_factor;
+                    return self.registry.state_seed_weight(sc, picks, s.action_succeeded) * ngram_rarity * barren_decay * success_boost * depth_factor;
                 }
             }
         }
@@ -1170,9 +1121,7 @@ impl StatePool {
         // sequence get progressively less energy. Core AFLFast insight.
         let path_freq = if s.path_hash != 0 {
             *self.path_freq.get(&s.path_hash).unwrap_or(&1) as f64
-        } else {
-            1.0
-        };
+        } else { 1.0 };
         let path_penalty = 1.0 / path_freq;
 
         // Exponential rarity: states covering rare edges get exponential boost.
@@ -1181,9 +1130,7 @@ impl StatePool {
         let rarity = if s.rarity_score > 0.0 {
             10.0_f64.powf((s.rarity_score * 75.0).min(3.0))
         } else {
-            (1.0 + s.pool_size_at_add as f64 / 100.0)
-                .log2()
-                .clamp(1.0, 3.0)
+            (1.0 + s.pool_size_at_add as f64 / 100.0).log2().clamp(1.0, 3.0)
         };
 
         // Productivity: proven producers dominate, barren states decay hard.
@@ -1235,16 +1182,7 @@ impl StatePool {
     pub fn pick_weighted_batch(
         &self,
         rng_vals: &[u64],
-        out: &mut Vec<(
-            Arc<CompactDelta>,
-            u32,
-            usize,
-            Arc<Vec<u8>>,
-            Option<u16>,
-            Arc<Vec<u8>>,
-            u64,
-            Option<Arc<dyn std::any::Any + Send + Sync>>,
-        )>,
+        out: &mut Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
     ) -> usize {
         let (cumulative, total) = self.build_weight_distribution();
         self.pick_weighted_batch_from(&cumulative, total, rng_vals, out)
@@ -1258,16 +1196,7 @@ impl StatePool {
         cumulative: &[f64],
         total: f64,
         rng_vals: &[u64],
-        out: &mut Vec<(
-            Arc<CompactDelta>,
-            u32,
-            usize,
-            Arc<Vec<u8>>,
-            Option<u16>,
-            Arc<Vec<u8>>,
-            u64,
-            Option<Arc<dyn std::any::Any + Send + Sync>>,
-        )>,
+        out: &mut Vec<(Arc<CompactDelta>, u32, usize, Arc<Vec<u8>>, Option<u16>, Arc<Vec<u8>>, u64, Option<Arc<dyn std::any::Any + Send + Sync>>)>,
     ) -> usize {
         if self.active_indices.is_empty() {
             return 0;
@@ -1285,13 +1214,9 @@ impl StatePool {
                 self.total_picks.fetch_add(1, Ordering::Relaxed);
                 let entry = &self.states[idx];
                 out.push((
-                    entry.delta.clone(),
-                    entry.depth,
-                    idx,
-                    entry.action_bytes.clone(),
-                    entry.action_variant,
-                    entry.action_field_bytes.clone(),
-                    entry.fingerprint,
+                    entry.delta.clone(), entry.depth, idx,
+                    entry.action_bytes.clone(), entry.action_variant,
+                    entry.action_field_bytes.clone(), entry.fingerprint,
                     entry.fixture_state.clone(),
                 ));
                 count += 1;
@@ -1345,12 +1270,7 @@ impl StatePool {
 
     /// Get debug state hash for a given entry.
     pub fn get_debug_hash(&self, idx: usize) -> u64 {
-        debug_assert!(
-            idx < self.states.len(),
-            "get_debug_hash: idx {} out of bounds (len {})",
-            idx,
-            self.states.len()
-        );
+        debug_assert!(idx < self.states.len(), "get_debug_hash: idx {} out of bounds (len {})", idx, self.states.len());
         self.states[idx].debug_state_hash
     }
 
@@ -1496,11 +1416,9 @@ impl StatePool {
             // Edge rarity: recompute mean inverse frequency from current edge_freq
             if let Some(ref positions) = self.states[idx].edge_positions {
                 if !positions.is_empty() {
-                    let score: f64 = positions
-                        .iter()
+                    let score: f64 = positions.iter()
                         .map(|&pos| 1.0 / (self.edge_freq[pos as usize] as f64 + 1.0))
-                        .sum::<f64>()
-                        / positions.len() as f64;
+                        .sum::<f64>() / positions.len() as f64;
                     self.states[idx].rarity_score = score;
                 }
             }
@@ -1539,9 +1457,7 @@ impl StatePool {
         let mut min_weight = f64::MAX;
         let mut min_pos: Option<usize> = None;
         for (pos, &idx) in self.active_indices.iter().enumerate() {
-            if self.states[idx].novel_children > 0 {
-                continue;
-            }
+            if self.states[idx].novel_children > 0 { continue; }
             let w = self.compute_weight(&self.states[idx], self.max_depth);
             if w < min_weight {
                 min_weight = w;
@@ -1583,7 +1499,7 @@ impl StatePool {
     /// Convenience wrapper: export without seed passthrough.
     #[cfg(test)]
     pub fn export_corpus_no_seeds(&self, dir: &str) -> std::io::Result<usize> {
-        self.export_corpus(dir, None)
+        self.export_corpus(dir, None, None)
     }
 
     /// Write a single entry to the corpus directory (called incrementally when new coverage is found).
@@ -1603,7 +1519,22 @@ impl StatePool {
 
     /// Write all pool entries' action sequences to disk as FuzzInput binary files.
     /// Returns the number of files written. Skips the initial state (depth 0, empty actions).
-    pub fn export_corpus(&self, dir: &str, seed_dir: Option<&str>) -> std::io::Result<usize> {
+    ///
+    /// If `context_free_edges` is Some(n), the diagnostic line reports n as the
+    /// "unique edges" count. Pass the shared bitmap count (e.g., via
+    /// `FuzzCallback::count_shared_bits(shared_edge_ptr, ...)`). That number is a
+    /// context-free edge count (hashed by `mix_hash(edge_id)`, no prev-pc XOR) and
+    /// matches the metric reported in `FUZZ_PULSE edges:` and `crucible cmin`.
+    /// If None, falls back to the legacy AFL-bucket-union count which is context-
+    /// SENSITIVE and typically ~10-20% higher than true edge count due to each
+    /// (pc,target_pc) pair hashing to different buckets from different parent
+    /// states.
+    pub fn export_corpus(
+        &self,
+        dir: &str,
+        seed_dir: Option<&str>,
+        context_free_edges: Option<usize>,
+    ) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
         let mut count = 0;
 
@@ -1634,13 +1565,9 @@ impl StatePool {
         let mut skipped_state_only = 0usize;
         for (idx, entry) in self.states.iter().enumerate() {
             // Skip initial empty state (just a 4-byte header with count=0)
-            if entry.action_bytes.len() <= 4 {
-                continue;
-            }
+            if entry.action_bytes.len() <= 4 { continue; }
             // Skip seed-loaded intermediates — the original files are already copied.
-            if idx < self.seed_count {
-                continue;
-            }
+            if idx < self.seed_count { continue; }
             // Only export states that discovered new code-edge coverage.
             if entry.edge_novelty == 0 {
                 skipped_state_only += 1;
@@ -1654,21 +1581,20 @@ impl StatePool {
             new_coverage += 1;
             count += 1;
         }
-        // Diagnostic: count unique edge positions across all exported entries.
-        // This shows whether the exported set captures all known coverage.
+        // Diagnostic: primary metric is context-free edge count (from shared
+        // bitmap, passed in by caller). Fall back to the legacy AFL-bucket
+        // union for older call sites, which is context-SENSITIVE and over-
+        // counts because `edge = (cur ^ prev) % MAP_SIZE` assigns different
+        // bucket indices to the same (pc,target_pc) pair from different
+        // parent states. The AFL-bucket count is still printed as a
+        // secondary debug field so the relationship is visible.
         let mut all_positions: FastHashSet<u16> = FastHashSet::default();
         let mut entries_with_positions = 0usize;
         let mut entries_without_positions = 0usize;
         for (idx, entry) in self.states.iter().enumerate() {
-            if entry.action_bytes.len() <= 4 {
-                continue;
-            }
-            if idx < self.seed_count {
-                continue;
-            }
-            if entry.edge_novelty == 0 {
-                continue;
-            }
+            if entry.action_bytes.len() <= 4 { continue; }
+            if idx < self.seed_count { continue; }
+            if entry.edge_novelty == 0 { continue; }
             if let Some(ref positions) = entry.edge_positions {
                 all_positions.extend(positions.iter());
                 entries_with_positions += 1;
@@ -1676,14 +1602,28 @@ impl StatePool {
                 entries_without_positions += 1;
             }
         }
-        eprintln!(
-            "[STATEFUL] Corpus: {} seed files + {} new coverage entries ({} state-only skipped)",
-            count - new_coverage,
-            new_coverage,
-            skipped_state_only
-        );
-        eprintln!("[STATEFUL] Coverage diagnostic: {} unique edge positions across {} entries ({} without positions)",
-            all_positions.len(), entries_with_positions, entries_without_positions);
+        eprintln!("[STATEFUL] Corpus: {} seed files + {} new coverage entries ({} state-only skipped)",
+            count - new_coverage, new_coverage, skipped_state_only);
+        match context_free_edges {
+            Some(n) => {
+                eprintln!(
+                    "[STATEFUL] Coverage diagnostic: {} unique edges across {} entries \
+                     (afl_bucket_union={} — context-sensitive, ignore)",
+                    n,
+                    entries_with_positions,
+                    all_positions.len()
+                );
+            }
+            None => {
+                eprintln!(
+                    "[STATEFUL] Coverage diagnostic: {} unique AFL bucket positions \
+                     (context-sensitive hash, NOT true edge count) across {} entries ({} without positions)",
+                    all_positions.len(),
+                    entries_with_positions,
+                    entries_without_positions
+                );
+            }
+        }
         Ok(count)
     }
 
@@ -1719,14 +1659,9 @@ impl StatePool {
         // ================================================================
         // Header
         // ================================================================
-        let _ = writeln!(
-            out,
-            "State Pool Report — {} states ({} active, {} evicted/crashed), {} total picks",
-            self.states.len(),
-            self.active_indices.len(),
-            self.states.len() - self.active_indices.len(),
-            tp
-        );
+        let _ = writeln!(out, "State Pool Report — {} states ({} active, {} evicted/crashed), {} total picks",
+            self.states.len(), self.active_indices.len(),
+            self.states.len() - self.active_indices.len(), tp);
         let _ = writeln!(out, "{}\n", "=".repeat(80));
 
         // ================================================================
@@ -1738,25 +1673,11 @@ impl StatePool {
             "idx", "dep", "actv", "picks", "weight", "prob%", "fingerprint", "novl", "ecov", "type", "chld", "viol", "ok", "psz", "rarity", "ngram", "action");
 
         for (idx, entry) in self.states.iter().enumerate() {
-            let active = if active_set.contains(&idx) {
-                "yes"
-            } else {
-                "-"
-            };
+            let active = if active_set.contains(&idx) { "yes" } else { "-" };
             let picks = entry.pick_count.load(Ordering::Relaxed);
             let w = weights.get(&idx).copied().unwrap_or(0.0);
-            let prob = if total_weight > 0.0 {
-                w / total_weight * 100.0
-            } else {
-                0.0
-            };
-            let wtype = if entry.edge_novelty > 0 {
-                "edge"
-            } else if entry.novelty_bits > 0 {
-                "fld"
-            } else {
-                "none"
-            };
+            let prob = if total_weight > 0.0 { w / total_weight * 100.0 } else { 0.0 };
+            let wtype = if entry.edge_novelty > 0 { "edge" } else if entry.novelty_bits > 0 { "fld" } else { "none" };
             let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<8} {:<10.2} {:<7.3} {:018x} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<5} {:<7.4} {:<6.1} {}",
                 idx, entry.depth, active, picks, w, prob, entry.fingerprint,
                 entry.novelty_bits, entry.edge_novelty, wtype, entry.novel_children, entry.violation_count,
@@ -1775,10 +1696,7 @@ impl StatePool {
         // ================================================================
         let _ = writeln!(out, "ACTION SEQUENCE TREE (n-gram)");
         let _ = writeln!(out, "----------------------------");
-        let _ = writeln!(
-            out,
-            "Shows which action sequences exist in the pool as a prefix tree."
-        );
+        let _ = writeln!(out, "Shows which action sequences exist in the pool as a prefix tree.");
         let _ = writeln!(out, "Each node: action_name [Nx (P%)] with annotations.\n");
         self.write_ngram_tree(&mut out, &active_set);
         let _ = writeln!(out, "");
@@ -1791,17 +1709,10 @@ impl StatePool {
         let max_depth = self.states.iter().map(|s| s.depth).max().unwrap_or(0);
         for d in 0..=max_depth {
             let total = self.states.iter().filter(|s| s.depth == d as u32).count();
-            let active = self
-                .active_indices
-                .iter()
-                .filter(|&&i| self.states[i].depth == d as u32)
-                .count();
+            let active = self.active_indices.iter()
+                .filter(|&&i| self.states[i].depth == d as u32).count();
             if total > 0 {
-                let _ = writeln!(
-                    out,
-                    "  depth {:<3}: {:>4} total, {:>4} active",
-                    d, total, active
-                );
+                let _ = writeln!(out, "  depth {:<3}: {:>4} total, {:>4} active", d, total, active);
             }
         }
         let _ = writeln!(out, "");
@@ -1812,9 +1723,7 @@ impl StatePool {
         let _ = writeln!(out, "WEIGHT DISTRIBUTION (active states)");
         let _ = writeln!(out, "------------------------------------");
         if !self.active_indices.is_empty() {
-            let mut sorted_weights: Vec<(usize, f64)> = self
-                .active_indices
-                .iter()
+            let mut sorted_weights: Vec<(usize, f64)> = self.active_indices.iter()
                 .map(|&idx| (idx, weights.get(&idx).copied().unwrap_or(0.0)))
                 .collect();
             sorted_weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -1822,27 +1731,14 @@ impl StatePool {
             let _ = writeln!(out, "  Top 15:");
             for (rank, (idx, w)) in sorted_weights.iter().take(15).enumerate() {
                 let entry = &self.states[*idx];
-                let prob = if total_weight > 0.0 {
-                    w / total_weight * 100.0
-                } else {
-                    0.0
-                };
-                let _ = writeln!(
-                    out,
-                    "    {:>3}. #{:<5} w={:<9.2} p={:.3}%  d={}  picks={}  novel={}  {}",
-                    rank + 1,
-                    idx,
-                    w,
-                    prob,
-                    entry.depth,
+                let prob = if total_weight > 0.0 { w / total_weight * 100.0 } else { 0.0 };
+                let _ = writeln!(out, "    {:>3}. #{:<5} w={:<9.2} p={:.3}%  d={}  picks={}  novel={}  {}",
+                    rank + 1, idx, w, prob, entry.depth,
                     entry.pick_count.load(Ordering::Relaxed),
                     entry.novelty_bits,
-                    if entry.action_desc.is_empty() {
-                        "(initial)"
-                    } else {
+                    if entry.action_desc.is_empty() { "(initial)" } else {
                         entry.action_desc.lines().next().unwrap_or("")
-                    }
-                );
+                    });
             }
 
             if sorted_weights.len() > 15 {
@@ -1850,27 +1746,14 @@ impl StatePool {
                 let start = sorted_weights.len().saturating_sub(10);
                 for (i, (idx, w)) in sorted_weights[start..].iter().enumerate() {
                     let entry = &self.states[*idx];
-                    let prob = if total_weight > 0.0 {
-                        w / total_weight * 100.0
-                    } else {
-                        0.0
-                    };
-                    let _ = writeln!(
-                        out,
-                        "    {:>3}. #{:<5} w={:<9.4} p={:.4}%  d={}  picks={}  novel={}  {}",
-                        start + i + 1,
-                        idx,
-                        w,
-                        prob,
-                        entry.depth,
+                    let prob = if total_weight > 0.0 { w / total_weight * 100.0 } else { 0.0 };
+                    let _ = writeln!(out, "    {:>3}. #{:<5} w={:<9.4} p={:.4}%  d={}  picks={}  novel={}  {}",
+                        start + i + 1, idx, w, prob, entry.depth,
                         entry.pick_count.load(Ordering::Relaxed),
                         entry.novelty_bits,
-                        if entry.action_desc.is_empty() {
-                            "(initial)"
-                        } else {
+                        if entry.action_desc.is_empty() { "(initial)" } else {
                             entry.action_desc.lines().next().unwrap_or("")
-                        }
-                    );
+                        });
                 }
             }
 
@@ -1878,17 +1761,9 @@ impl StatePool {
             let _ = writeln!(out, "\n  Percentiles:");
             for &p in &pcts {
                 let i = (sorted_weights.len() * p / 100).min(sorted_weights.len() - 1);
-                let _ = writeln!(
-                    out,
-                    "    p{}: w={:.4}, p={:.4}%",
-                    p,
-                    sorted_weights[i].1,
-                    if total_weight > 0.0 {
-                        sorted_weights[i].1 / total_weight * 100.0
-                    } else {
-                        0.0
-                    }
-                );
+                let _ = writeln!(out, "    p{}: w={:.4}, p={:.4}%",
+                    p, sorted_weights[i].1,
+                    if total_weight > 0.0 { sorted_weights[i].1 / total_weight * 100.0 } else { 0.0 });
             }
         }
         let _ = writeln!(out, "");
@@ -1903,38 +1778,22 @@ impl StatePool {
             // Build variant name lookup from pool entries' action_desc
             let variant_names = self.infer_variant_names();
             for (vi, [s, t]) in all_stats.iter().enumerate() {
-                let name = variant_names
-                    .get(&(vi as u16))
-                    .map(|s| s.as_str())
-                    .unwrap_or("?");
-                let rate = if *t > 0 {
-                    *s as f64 / *t as f64 * 100.0
-                } else {
-                    0.0
-                };
-                let _ = writeln!(
-                    out,
-                    "  {:<3} {:<30} {:>6}/{:<6} ({:>5.1}% ok)",
-                    vi, name, s, t, rate
-                );
+                let name = variant_names.get(&(vi as u16)).map(|s| s.as_str()).unwrap_or("?");
+                let rate = if *t > 0 { *s as f64 / *t as f64 * 100.0 } else { 0.0 };
+                let _ = writeln!(out, "  {:<3} {:<30} {:>6}/{:<6} ({:>5.1}% ok)",
+                    vi, name, s, t, rate);
             }
             let total_attempts: u32 = all_stats.iter().map(|[_, t]| t).sum();
             let total_successes: u32 = all_stats.iter().map(|[s, _]| s).sum();
             if total_attempts > 0 {
-                let _ = writeln!(
-                    out,
-                    "  {:<34} {:>6}/{:<6} ({:>5.1}% ok)",
-                    "TOTAL",
-                    total_successes,
-                    total_attempts,
-                    total_successes as f64 / total_attempts as f64 * 100.0
-                );
+                let _ = writeln!(out, "  {:<34} {:>6}/{:<6} ({:>5.1}% ok)",
+                    "TOTAL", total_successes, total_attempts,
+                    total_successes as f64 / total_attempts as f64 * 100.0);
             }
 
             // Top state classes by attempt count
             let _ = writeln!(out, "\n  Top state classes (by attempts):");
-            let mut class_totals: Vec<(u16, u32)> = stats_map
-                .iter_classes()
+            let mut class_totals: Vec<(u16, u32)> = stats_map.iter_classes()
                 .map(|(sc, stats)| {
                     let total: u32 = stats.counts_ref().iter().map(|[_, t]| t).sum();
                     (sc, total)
@@ -1945,19 +1804,11 @@ impl StatePool {
                 if let Some(stats) = stats_map.get_stats(*sc) {
                     let _ = writeln!(out, "\n    class {:04x} ({} attempts):", sc, total_att);
                     for (vi, count) in stats.counts_ref().iter().enumerate() {
-                        if count[1] == 0 {
-                            continue;
-                        }
-                        let name = variant_names
-                            .get(&(vi as u16))
-                            .map(|s| s.as_str())
-                            .unwrap_or("?");
+                        if count[1] == 0 { continue; }
+                        let name = variant_names.get(&(vi as u16)).map(|s| s.as_str()).unwrap_or("?");
                         let rate = count[0] as f64 / count[1] as f64 * 100.0;
-                        let _ = writeln!(
-                            out,
-                            "      {:<3} {:<28} {:>5}/{:<5} ({:>5.1}% ok)",
-                            vi, name, count[0], count[1], rate
-                        );
+                        let _ = writeln!(out, "      {:<3} {:<28} {:>5}/{:<5} ({:>5.1}% ok)",
+                            vi, name, count[0], count[1], rate);
                     }
                 }
             }
@@ -1966,41 +1817,24 @@ impl StatePool {
         // ================================================================
         // Section 6: State Registry (SCFuzz stats)
         // ================================================================
-        let _ = writeln!(
-            out,
-            "\nSTATE REGISTRY (phase: {:?}, {} classes)",
-            self.phase,
-            self.registry.len()
-        );
+        let _ = writeln!(out, "\nSTATE REGISTRY (phase: {:?}, {} classes)", self.phase, self.registry.len());
         let _ = writeln!(out, "--------------");
         if !self.registry.map.is_empty() {
-            let _ = writeln!(
-                out,
-                "{:<6} {:<8} {:<8} {:<8} {:<8} {:<6} {:<12} {:<10}",
-                "class", "trigger", "select", "paths", "out_tx", "depth", "last_find", "weight"
-            );
+            let _ = writeln!(out, "{:<6} {:<8} {:<8} {:<8} {:<8} {:<6} {:<12} {:<10}",
+                "class", "trigger", "select", "paths", "out_tx", "depth", "last_find", "weight");
             // Sort by state_seed_weight descending, show top 30
-            let mut entries: Vec<(u16, f64)> = self
-                .registry
-                .map
-                .iter()
-                .map(|(&sc, _)| (sc, self.registry.state_seed_weight(sc, 10.0, true)))
+            let mut entries: Vec<(u16, f64)> = self.registry.map.iter()
+                .map(|(&sc, _)| {
+                    (sc, self.registry.state_seed_weight(sc, 10.0, true))
+                })
                 .collect();
             entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             for (sc, w) in entries.iter().take(30) {
                 if let Some(stats) = self.registry.get(*sc) {
-                    let _ = writeln!(
-                        out,
-                        "{:04x}   {:<8} {:<8} {:<8} {:<8} {:<6} {:<12} {:<10.2}",
-                        sc,
-                        stats.trigger_count,
-                        stats.select_count,
-                        stats.paths_discovered,
-                        stats.out_transitions,
-                        stats.depth,
-                        stats.last_new_find,
-                        w
-                    );
+                    let _ = writeln!(out, "{:04x}   {:<8} {:<8} {:<8} {:<8} {:<6} {:<12} {:<10.2}",
+                        sc, stats.trigger_count, stats.select_count,
+                        stats.paths_discovered, stats.out_transitions,
+                        stats.depth, stats.last_new_find, w);
                 }
             }
             if entries.len() > 30 {
@@ -2015,95 +1849,33 @@ impl StatePool {
         let mem = self.memory_stats();
         let _ = writeln!(out, "MEMORY BREAKDOWN");
         let _ = writeln!(out, "----------------");
-        let _ = writeln!(
-            out,
-            "  Pool: {} states ({} active, {} evicted), capacity: {}",
-            mem.total_states,
-            mem.active_states,
-            mem.total_states - mem.active_states,
-            mem.capacity
-        );
-        let _ = writeln!(
-            out,
-            "  Delta heap (accounts):  {:.1} MB  ({} total account entries across all deltas)",
-            mem.total_delta_heap_bytes as f64 / 1_048_576.0,
-            mem.total_delta_accounts
-        );
-        let _ = writeln!(
-            out,
-            "  Fixtures stored:        {}  (of {} states have Some(fixture_state))",
-            mem.fixture_state_count, mem.total_states
-        );
-        let _ = writeln!(
-            out,
-            "  Action bytes:           {:.1} MB",
-            mem.total_action_bytes as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  Action descs:           {:.1} MB",
-            mem.total_desc_bytes as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  Field bytes:            {:.1} MB",
-            mem.total_field_bytes as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  Edge positions:         {:.1} MB",
-            mem.total_edge_position_bytes as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  Entry struct overhead:  {:.1} MB",
-            mem.entry_overhead_bytes as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  Edge freq table:        {:.1} MB",
-            mem.edge_freq_bytes as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  Seen set:               {} entries",
-            mem.seen_entries
-        );
-        let _ = writeln!(
-            out,
-            "  Active indices:         {:.1} KB",
-            mem.active_indices_bytes as f64 / 1024.0
-        );
+        let _ = writeln!(out, "  Pool: {} states ({} active, {} evicted), capacity: {}",
+            mem.total_states, mem.active_states, mem.total_states - mem.active_states, mem.capacity);
+        let _ = writeln!(out, "  Delta heap (accounts):  {:.1} MB  ({} total account entries across all deltas)",
+            mem.total_delta_heap_bytes as f64 / 1_048_576.0, mem.total_delta_accounts);
+        let _ = writeln!(out, "  Fixtures stored:        {}  (of {} states have Some(fixture_state))",
+            mem.fixture_state_count, mem.total_states);
+        let _ = writeln!(out, "  Action bytes:           {:.1} MB", mem.total_action_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Action descs:           {:.1} MB", mem.total_desc_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Field bytes:            {:.1} MB", mem.total_field_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Edge positions:         {:.1} MB", mem.total_edge_position_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Entry struct overhead:  {:.1} MB", mem.entry_overhead_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Edge freq table:        {:.1} MB", mem.edge_freq_bytes as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  Seen set:               {} entries", mem.seen_entries);
+        let _ = writeln!(out, "  Active indices:         {:.1} KB", mem.active_indices_bytes as f64 / 1024.0);
         let _ = writeln!(out, "  ─────────────────────────────────");
-        let _ = writeln!(
-            out,
-            "  POOL TOTAL:             {:.1} MB",
-            mem.total_bytes() as f64 / 1_048_576.0
-        );
-        let _ = writeln!(
-            out,
-            "  (Note: delta heap may overcount shared Arc<Account> data between parent/child)"
-        );
+        let _ = writeln!(out, "  POOL TOTAL:             {:.1} MB", mem.total_bytes() as f64 / 1_048_576.0);
+        let _ = writeln!(out, "  (Note: delta heap may overcount shared Arc<Account> data between parent/child)");
         let _ = writeln!(out, "");
 
         // Per-entry memory detail (sorted by delta heap size descending, top 50 + bottom 10)
-        let _ = writeln!(
-            out,
-            "PER-ENTRY MEMORY (top 50 by delta heap, then bottom 10)"
-        );
-        let _ = writeln!(
-            out,
-            "-------------------------------------------------------"
-        );
-        let _ = writeln!(
-            out,
-            "{:<6} {:<4} {:<6} {:<6} {:<10} {:<8} {:<8} {}",
-            "idx", "dep", "actv", "accts", "heap_KB", "sysv_KB", "abytes", "top patches by size"
-        );
+        let _ = writeln!(out, "PER-ENTRY MEMORY (top 50 by delta heap, then bottom 10)");
+        let _ = writeln!(out, "-------------------------------------------------------");
+        let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<6} {:<10} {:<8} {:<8} {}",
+            "idx", "dep", "actv", "accts", "heap_KB", "sysv_KB", "abytes", "top patches by size");
 
         // Collect per-entry memory info
-        let mut entry_mem: Vec<(usize, usize, usize, Vec<(String, usize)>)> =
-            Vec::with_capacity(self.states.len());
+        let mut entry_mem: Vec<(usize, usize, usize, Vec<(String, usize)>)> = Vec::with_capacity(self.states.len());
         for (idx, entry) in self.states.iter().enumerate() {
             let delta = &*entry.delta;
             let heap = delta.estimated_heap_bytes();
@@ -2114,33 +1886,20 @@ impl StatePool {
         }
         entry_mem.sort_by(|a, b| b.1.cmp(&a.1));
 
-        let write_entry = |out: &mut String,
-                           (idx, heap_bytes, sysvar_bytes, ref acct_sizes): &(
-            usize,
-            usize,
-            usize,
-            Vec<(String, usize)>,
-        )| {
+        let write_entry = |out: &mut String, (idx, heap_bytes, sysvar_bytes, ref acct_sizes): &(usize, usize, usize, Vec<(String, usize)>)| {
             let entry = &self.states[*idx];
             let active = if active_set.contains(idx) { "yes" } else { "-" };
-            let top_accts: String = acct_sizes
-                .iter()
-                .take(5)
+            let top_accts: String = acct_sizes.iter().take(5)
                 .map(|(pk, sz)| format!("{}:{:.1}K", pk, *sz as f64 / 1024.0))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let _ = writeln!(
-                out,
-                "{:<6} {:<4} {:<6} {:<6} {:<10.1} {:<8.1} {:<8} {}",
-                idx,
-                entry.depth,
-                active,
+            let _ = writeln!(out, "{:<6} {:<4} {:<6} {:<6} {:<10.1} {:<8.1} {:<8} {}",
+                idx, entry.depth, active,
                 entry.delta.account_count(),
                 *heap_bytes as f64 / 1024.0,
                 *sysvar_bytes as f64 / 1024.0,
                 entry.action_bytes.len(),
-                top_accts
-            );
+                top_accts);
         };
 
         // Top 50
@@ -2163,18 +1922,12 @@ impl StatePool {
         let _ = writeln!(out, "-----------------------------");
         let mut acct_count_hist: FastHashMap<usize, usize> = FastHashMap::default();
         for entry in &self.states {
-            *acct_count_hist
-                .entry(entry.delta.account_count())
-                .or_insert(0) += 1;
+            *acct_count_hist.entry(entry.delta.account_count()).or_insert(0) += 1;
         }
         let mut hist_sorted: Vec<(usize, usize)> = acct_count_hist.into_iter().collect();
         hist_sorted.sort_by_key(|&(count, _)| count);
         for (acct_count, num_entries) in &hist_sorted {
-            let _ = writeln!(
-                out,
-                "  {:>4} accounts: {:>5} entries",
-                acct_count, num_entries
-            );
+            let _ = writeln!(out, "  {:>4} accounts: {:>5} entries", acct_count, num_entries);
         }
         let _ = writeln!(out, "");
 
@@ -2197,9 +1950,9 @@ impl StatePool {
         let mut names: FastHashMap<u16, String> = FastHashMap::default();
         for entry in &self.states {
             if let Some(vi) = entry.action_variant {
-                names
-                    .entry(vi)
-                    .or_insert_with(|| Self::action_name_from_desc(&entry.action_desc).to_string());
+                names.entry(vi).or_insert_with(|| {
+                    Self::action_name_from_desc(&entry.action_desc).to_string()
+                });
             }
         }
         names
@@ -2217,20 +1970,14 @@ impl StatePool {
         // Each node: action_name -> TrieNode
         struct TrieNode {
             children: FastHashMap<String, TrieNode>,
-            count: usize,    // how many chains pass through
-            terminal: usize, // how many chains end here (= pool states at this depth)
-            crashed: usize,  // terminal states that are crashed
-            novel_bits: u32, // sum of novelty_bits for terminal states
+            count: usize,       // how many chains pass through
+            terminal: usize,    // how many chains end here (= pool states at this depth)
+            crashed: usize,     // terminal states that are crashed
+            novel_bits: u32,    // sum of novelty_bits for terminal states
         }
         impl TrieNode {
             fn new() -> Self {
-                Self {
-                    children: FastHashMap::default(),
-                    count: 0,
-                    terminal: 0,
-                    crashed: 0,
-                    novel_bits: 0,
-                }
+                Self { children: FastHashMap::default(), count: 0, terminal: 0, crashed: 0, novel_bits: 0 }
             }
         }
 
@@ -2253,51 +2000,34 @@ impl StatePool {
             }
             chain.reverse();
 
-            if chain.is_empty() {
-                continue;
-            } // skip initial state
+            if chain.is_empty() { continue; } // skip initial state
 
             let is_crashed = !active_set.contains(&idx);
             let mut node = &mut root;
             for name in &chain {
                 node.count += 1;
-                node = node
-                    .children
-                    .entry(name.clone())
-                    .or_insert_with(TrieNode::new);
+                node = node.children.entry(name.clone()).or_insert_with(TrieNode::new);
             }
             node.count += 1;
             node.terminal += 1;
-            if is_crashed {
-                node.crashed += 1;
-            }
+            if is_crashed { node.crashed += 1; }
             node.novel_bits += entry.novelty_bits;
         }
 
         // Render trie
         fn render(node: &TrieNode, out: &mut String, prefix: &str, total: usize, max_depth: usize) {
             use std::fmt::Write as FmtWrite;
-            if max_depth == 0 {
-                return;
-            }
+            if max_depth == 0 { return; }
             let mut children: Vec<(&String, &TrieNode)> = node.children.iter().collect();
             children.sort_by(|a, b| b.1.count.cmp(&a.1.count));
 
             let show_limit = 15;
-            let hidden = if children.len() > show_limit {
-                children.len() - show_limit
-            } else {
-                0
-            };
+            let hidden = if children.len() > show_limit { children.len() - show_limit } else { 0 };
 
             for (i, (name, child)) in children.iter().take(show_limit).enumerate() {
                 let is_last = i == children.len().min(show_limit) - 1 && hidden == 0;
                 let connector = if is_last { "\\--" } else { "|--" };
-                let pct = if total > 0 {
-                    child.count as f64 / total as f64 * 100.0
-                } else {
-                    0.0
-                };
+                let pct = if total > 0 { child.count as f64 / total as f64 * 100.0 } else { 0.0 };
 
                 let mut annotation = format!("[{}x ({:.0}%)", child.count, pct);
                 if child.novel_bits > 0 {
@@ -2357,9 +2087,7 @@ impl StatePool {
         for &entry_idx in &chain {
             let entry = &self.states[entry_idx];
             let entry_bytes = &*entry.action_bytes;
-            if entry_bytes.len() <= 4 {
-                continue;
-            } // skip initial empty state
+            if entry_bytes.len() <= 4 { continue; } // skip initial empty state
 
             let parent_byte_len = match entry.parent_idx {
                 Some(pidx) => self.states[pidx].action_bytes.len(),
@@ -2400,10 +2128,7 @@ impl StatePool {
 
     /// Walk the parent chain and return (variant_idx, field_bytes) pairs for each action (oldest first).
     /// Used by subsequence splice to extract action parameters from existing pool states.
-    pub fn reconstruct_variant_field_sequence(
-        &self,
-        state_idx: usize,
-    ) -> Vec<(usize, Arc<Vec<u8>>)> {
+    pub fn reconstruct_variant_field_sequence(&self, state_idx: usize) -> Vec<(usize, Arc<Vec<u8>>)> {
         let mut chain = Vec::new();
         let mut idx = state_idx;
         loop {
@@ -2461,59 +2186,20 @@ mod tests {
         let mut pool = StatePool::new(100, 10);
         // Add initial state
         let delta = make_empty_delta();
-        pool.try_add(
-            0,
-            delta,
-            0,
-            None,
-            vec![0, 0, 0, 0],
-            String::new(),
-            None,
-            vec![],
-            None,
-            0,
-            0,
-            true,
-            None,
-        );
+        pool.try_add(0, delta, 0, None, vec![0, 0, 0, 0], String::new(),
+            None, vec![], None, 0, 0, true, None);
 
         // Add a field-only entry (edge_novelty=0)
         let delta = make_empty_delta();
         let action_bytes = vec![1, 0, 0, 0, 0x01, 0x00, 0xAA]; // 1 action
-        pool.try_add(
-            1,
-            delta,
-            1,
-            Some(0),
-            action_bytes,
-            "field_action -> OK".into(),
-            Some(0),
-            vec![0xAA],
-            None,
-            5,
-            0,
-            true,
-            None,
-        );
+        pool.try_add(1, delta, 1, Some(0), action_bytes, "field_action -> OK".into(),
+            Some(0), vec![0xAA], None, 5, 0, true, None);
 
         // Add a coverage entry (edge_novelty=3)
         let delta = make_empty_delta();
         let action_bytes = vec![1, 0, 0, 0, 0x02, 0x00, 0xBB]; // 1 action
-        pool.try_add(
-            2,
-            delta,
-            1,
-            Some(0),
-            action_bytes,
-            "cov_action -> OK".into(),
-            Some(1),
-            vec![0xBB],
-            None,
-            3,
-            3,
-            true,
-            Some(vec![10, 20, 30]),
-        );
+        pool.try_add(2, delta, 1, Some(0), action_bytes, "cov_action -> OK".into(),
+            Some(1), vec![0xBB], None, 3, 3, true, Some(vec![10, 20, 30]));
 
         pool
     }
@@ -2524,7 +2210,7 @@ mod tests {
         let dir = std::env::temp_dir().join("crucible_test_export_field_only");
         let _ = std::fs::remove_dir_all(&dir);
 
-        let count = pool.export_corpus(dir.to_str().unwrap(), None).unwrap();
+        let count = pool.export_corpus(dir.to_str().unwrap(), None, None).unwrap();
 
         // Only the coverage entry should be exported (not the initial or field-only)
         assert_eq!(count, 1, "should export only coverage entries");
@@ -2540,32 +2226,16 @@ mod tests {
         // Add another coverage entry after seed boundary
         let delta = make_empty_delta();
         let action_bytes = vec![1, 0, 0, 0, 0x03, 0x00, 0xCC];
-        pool.try_add(
-            3,
-            delta,
-            1,
-            Some(0),
-            action_bytes,
-            "new_cov -> OK".into(),
-            Some(2),
-            vec![0xCC],
-            None,
-            2,
-            2,
-            true,
-            Some(vec![40, 50]),
-        );
+        pool.try_add(3, delta, 1, Some(0), action_bytes, "new_cov -> OK".into(),
+            Some(2), vec![0xCC], None, 2, 2, true, Some(vec![40, 50]));
 
         let dir = std::env::temp_dir().join("crucible_test_export_seed_skip");
         let _ = std::fs::remove_dir_all(&dir);
 
-        let count = pool.export_corpus(dir.to_str().unwrap(), None).unwrap();
+        let count = pool.export_corpus(dir.to_str().unwrap(), None, None).unwrap();
 
         // Only the post-seed coverage entry should be exported
-        assert_eq!(
-            count, 1,
-            "should skip seed entries and only export new coverage"
-        );
+        assert_eq!(count, 1, "should skip seed entries and only export new coverage");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2584,9 +2254,11 @@ mod tests {
         std::fs::write(seed_dir.join(".hidden"), b"skip").unwrap();
         std::fs::write(seed_dir.join("x.metadata"), b"skip").unwrap();
 
-        let count = pool
-            .export_corpus(out_dir.to_str().unwrap(), Some(seed_dir.to_str().unwrap()))
-            .unwrap();
+        let count = pool.export_corpus(
+            out_dir.to_str().unwrap(),
+            Some(seed_dir.to_str().unwrap()),
+            None,
+        ).unwrap();
 
         // 2 seed files + 1 coverage entry = 3
         assert_eq!(count, 3);
@@ -2603,37 +2275,11 @@ mod tests {
     fn mark_seed_boundary_sets_count() {
         let mut pool = StatePool::new(100, 10);
         let delta = make_empty_delta();
-        pool.try_add(
-            0,
-            delta,
-            0,
-            None,
-            vec![0, 0, 0, 0],
-            String::new(),
-            None,
-            vec![],
-            None,
-            0,
-            0,
-            true,
-            None,
-        );
+        pool.try_add(0, delta, 0, None, vec![0, 0, 0, 0], String::new(),
+            None, vec![], None, 0, 0, true, None);
         let delta = make_empty_delta();
-        pool.try_add(
-            1,
-            delta,
-            1,
-            Some(0),
-            vec![1, 0, 0, 0, 0, 0],
-            "a -> OK".into(),
-            Some(0),
-            vec![],
-            None,
-            1,
-            1,
-            true,
-            None,
-        );
+        pool.try_add(1, delta, 1, Some(0), vec![1, 0, 0, 0, 0, 0],
+            "a -> OK".into(), Some(0), vec![], None, 1, 1, true, None);
 
         pool.mark_seed_boundary();
         assert_eq!(pool.seed_count, 2);

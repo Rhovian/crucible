@@ -37,7 +37,7 @@ use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program_pack::Pack;
 use anchor_lang::solana_program::system_program;
 use anchor_lang::{AnchorDeserialize, AnchorSerialize, Discriminator};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use spl_token::solana_program::program_option::COption;
 
 mod account_builders;
@@ -143,11 +143,149 @@ thread_local! {
     static STATEFUL_CHAIN_MODE: Cell<bool> = const { Cell::new(false) };
     // Corpus loading phase: suppress monitor output during loading
     static CORPUS_LOADING: Cell<bool> = const { Cell::new(false) };
+    // Current iteration's input bytes, for slow-tx capture in send().
+    static CURRENT_INPUT_BYTES: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    // Per-thread running stats over send() durations (Welford).
+    static SLOW_COUNT: Cell<u64> = const { Cell::new(0) };
+    static SLOW_MEAN_US: Cell<f64> = const { Cell::new(0.0) };
+    static SLOW_M2: Cell<f64> = const { Cell::new(0.0) };
+    static SLOW_K_SIGMA: Cell<f64> = const { Cell::new(3.09) };
+    static SLOW_WARMUP: Cell<u64> = const { Cell::new(2048) };
+    static SLOW_LOG: RefCell<Option<std::fs::File>> = RefCell::new(None);
+    static SLOW_INIT: Cell<bool> = const { Cell::new(false) };
 }
 
 // Sentinel: has FUZZ_DEBUG TLS been initialized on this thread?
 thread_local! {
     static FUZZ_DEBUG_INIT: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn set_current_input_bytes(bytes: &[u8]) {
+    CURRENT_INPUT_BYTES.with(|c| {
+        let mut buf = c.borrow_mut();
+        buf.clear();
+        buf.extend_from_slice(bytes);
+    });
+}
+
+pub fn clear_current_input_bytes() {
+    CURRENT_INPUT_BYTES.with(|c| c.borrow_mut().clear());
+}
+
+fn slow_init() -> bool {
+    SLOW_INIT.with(|init| {
+        if init.get() {
+            return SLOW_LOG.with(|f| f.borrow().is_some());
+        }
+        init.set(true);
+        let path = std::env::var("FUZZ_SLOW_LOG").unwrap_or_else(|_| "/tmp/log.txt".to_string());
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(k) = std::env::var("FUZZ_SLOW_K_SIGMA").and_then(|s| s.parse::<f64>().map_err(|_| std::env::VarError::NotPresent)) {
+            SLOW_K_SIGMA.with(|c| c.set(k));
+        }
+        if let Ok(w) = std::env::var("FUZZ_SLOW_WARMUP").and_then(|s| s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent)) {
+            SLOW_WARMUP.with(|c| c.set(w));
+        }
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => {
+                SLOW_LOG.with(|cell| *cell.borrow_mut() = Some(f));
+                true
+            }
+            Err(e) => {
+                eprintln!("[FUZZ_SLOW] failed to open {}: {}", path, e);
+                false
+            }
+        }
+    })
+}
+
+pub fn maybe_record_slow_tx(elapsed_us: u128, label: &str) {
+    if !slow_init() {
+        return;
+    }
+    let n = SLOW_COUNT.with(|c| {
+        let v = c.get() + 1;
+        c.set(v);
+        v
+    });
+    let x = elapsed_us as f64;
+    let mean_prev = SLOW_MEAN_US.with(|c| c.get());
+    let delta = x - mean_prev;
+    let mean = mean_prev + delta / n as f64;
+    let m2 = SLOW_M2.with(|c| c.get()) + delta * (x - mean);
+    SLOW_MEAN_US.with(|c| c.set(mean));
+    SLOW_M2.with(|c| c.set(m2));
+    let warmup = SLOW_WARMUP.with(|c| c.get());
+    if n < warmup {
+        return;
+    }
+    let var = if n > 1 { m2 / (n as f64 - 1.0) } else { 0.0 };
+    let stddev = var.sqrt();
+    let k = SLOW_K_SIGMA.with(|c| c.get());
+    let threshold = mean + k * stddev;
+    if x < threshold {
+        return;
+    }
+    let iter = CURRENT_ITERATION.with(|c| *c.borrow());
+    let test_name = CURRENT_TEST_NAME.with(|c| c.borrow().clone().unwrap_or_default());
+    let last_action = ACTION_HISTORY.with(|c| {
+        c.borrow()
+            .last()
+            .map(|r| r.name.clone())
+            .unwrap_or_default()
+    });
+    let action_count = ACTION_HISTORY.with(|c| c.borrow().len());
+    let input_b64 = CURRENT_INPUT_BYTES.with(|cb| {
+        let bytes = cb.borrow();
+        if bytes.is_empty() {
+            String::new()
+        } else {
+            base64_encode(&bytes)
+        }
+    });
+    use std::io::Write;
+    SLOW_LOG.with(|cell| {
+        if let Some(f) = cell.borrow_mut().as_mut() {
+            let _ = writeln!(
+                f,
+                "{{\"us\":{},\"label\":\"{}\",\"n\":{},\"mean_us\":{:.1},\"stddev_us\":{:.1},\"iter\":{},\"test\":\"{}\",\"last_action\":\"{}\",\"action_count\":{},\"input_b64\":\"{}\"}}",
+                elapsed_us, label, n, mean, stddev, iter, test_name, last_action, action_count, input_b64
+            );
+            let _ = f.flush();
+        }
+    });
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let b = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+        out.push(TABLE[((b >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((b >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((b >> 6) & 0x3f) as usize] as char);
+        out.push(TABLE[(b & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let b = (bytes[i] as u32) << 16;
+        out.push(TABLE[((b >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((b >> 12) & 0x3f) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let b = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        out.push(TABLE[((b >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((b >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((b >> 6) & 0x3f) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 /// Check FUZZ_DEBUG env var (cached per-thread after first call).
@@ -1391,11 +1529,11 @@ impl InvocationInspectCallback for EmptyInvocationCallback {
 
 impl TestContext {
     pub fn new() -> Self {
-        // When ANCHOR_FUZZ_DEBUGGABLE is set (by the fuzz macro), create a debuggable SVM
+        // When CRUCIBLE_FUZZ_DEBUGGABLE is set (by the fuzz macro), create a debuggable SVM
         // so programs are loaded with register tracing support baked in.
         // Use EmptyInvocationCallback to suppress "Error collecting register tracing" messages
         // from DefaultRegisterTracingCallback trying to find .so files for built-in programs.
-        let svm = if std::env::var("ANCHOR_FUZZ_DEBUGGABLE").is_ok() {
+        let svm = if std::env::var("CRUCIBLE_FUZZ_DEBUGGABLE").is_ok() {
             let mut svm = LiteSVM::new_debuggable(true)
                 .with_transaction_history(0)
                 .with_sigverify(false)
@@ -1555,6 +1693,25 @@ impl TestContext {
         program_id: &Pubkey,
         program_data: &[u8],
     ) -> Result<()> {
+        // Honor FUZZ_PROGRAM_SO override even when the caller supplies raw
+        // bytes (e.g. `rpc_clone` cloning an executable program from mainnet).
+        // Without this, `--program-so` silently does nothing for rpc-cloned
+        // programs and coverage replay ends up executing the wrong binary.
+        let override_bytes;
+        let program_data: &[u8] = if let Ok(override_path) = std::env::var("FUZZ_PROGRAM_SO") {
+            eprintln!(
+                "[COVERAGE] Program binary override: <{} bytes> -> {}",
+                program_data.len(),
+                override_path
+            );
+            override_bytes = std::fs::read(&override_path).with_context(|| {
+                format!("failed to read FUZZ_PROGRAM_SO override at {override_path}")
+            })?;
+            &override_bytes
+        } else {
+            program_data
+        };
+
         // Run static analysis to get total edge and instruction count for coverage percentages
         if let Some((total_edges, total_instructions)) =
             Self::analyze_program_coverage(program_data)
@@ -1602,7 +1759,7 @@ impl TestContext {
     }
 
     /// Clone this context and set an invocation callback for coverage tracking.
-    /// The source SVM must have been created with debuggable mode (via ANCHOR_FUZZ_DEBUGGABLE env var)
+    /// The source SVM must have been created with debuggable mode (via CRUCIBLE_FUZZ_DEBUGGABLE env var)
     /// for register tracing to work. Cloning preserves the debuggable state and loaded programs.
     ///
     /// NOTE: For better performance in fuzzing loops, prefer using `set_invocation_callback` after
@@ -1638,7 +1795,7 @@ impl TestContext {
     /// Unlike `clone_with_invocation_callback`, this modifies the context in place
     /// without performing an additional SVM clone.
     ///
-    /// The SVM must have been created with debuggable mode (via ANCHOR_FUZZ_DEBUGGABLE env var)
+    /// The SVM must have been created with debuggable mode (via CRUCIBLE_FUZZ_DEBUGGABLE env var)
     /// for register tracing to work.
     ///
     /// Usage pattern for fuzzing loops:

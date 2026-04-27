@@ -17,8 +17,7 @@ crucible-fuzzer = {{ git = "{repo}", branch = "{branch}" }}
 crucible-test-context = {{ git = "{repo}", branch = "{branch}" }}
 crucible-idl-gen = {{ git = "{repo}", branch = "{branch}" }}
 
-# Anchor (v3-compatible fork with solana-sysvar ~3.1 fix)
-anchor-lang = {{ git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }}
+anchor-lang = "1.0.1"
 
 # Solana v3.x (required for litesvm 0.9.0)
 solana-pubkey = "3.0"

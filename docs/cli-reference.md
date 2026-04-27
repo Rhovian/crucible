@@ -31,7 +31,7 @@ crucible run <program_name> <test_name> [OPTIONS]
 | `--no-tracing` | Disable SVM register tracing (~2x faster, no coverage) |
 | `--stop-on-crash` | Stop fuzzing on first crash |
 | `--max-actions <N>` | Max actions per iteration (default: 8 stateless, 100 stateful) |
-| `--stateful` | ItyFuzz-style stateful fuzzing: single action per iteration with state pool |
+| `--stateful` | Stateful fuzzing: single action per iteration with state pool |
 | `--max-depth <N>` | Maximum state depth (action chain length) in stateful mode (default: 15) |
 | `--pool-size <N>` | State pool capacity in stateful mode (default: 256000) |
 | `--program-so <PATH>` | Override the program `.so` loaded by the harness |
@@ -68,7 +68,7 @@ crucible run myproject invariant_test --replay ./crashes/invariant_test/abc123
 # Reproducible fuzzing
 crucible run myproject invariant_test --release --seed 12345
 
-# Stateful mode (ItyFuzz-style)
+# Stateful mode
 crucible run myproject invariant_test --release --stateful
 
 # Stateful with custom depth and multi-core
@@ -161,13 +161,13 @@ crucible tmin myproject invariant_test --all --release
 4. **Coverage-Only** (`--coverage --corpus-in`) - Run corpus once for coverage report
 5. **Seeded Fuzzing** (`--corpus-in`) - Start from pre-existing corpus
 6. **Multi-Core** (`--cores N`) - Parallel fuzzer workers with shared coverage
-7. **Stateful** (`--stateful`) - ItyFuzz-style single action per iteration with state pool
+7. **Stateful** (`--stateful`) - Single action per iteration with state pool
 8. **Corpus Minimization** (`crucible cmin`) - Reduce corpus to minimal set preserving coverage
 9. **Crash Minimization** (`crucible tmin`) - Reduce crash to minimal reproducing action sequence
 
 ### Stateful Mode
 
-Stateful mode (`--stateful`) uses an ItyFuzz-style approach where each fuzzer iteration executes a **single action** on a state selected from a pool, rather than replaying an entire action sequence from scratch.
+Stateful mode (`--stateful`) uses a state-pool approach where each fuzzer iteration executes a **single action** on a state selected from a pool, rather than replaying an entire action sequence from scratch.
 
 - States form a tree: each state has a parent and a depth (action chain length)
 - New states are created by applying an action to an existing state

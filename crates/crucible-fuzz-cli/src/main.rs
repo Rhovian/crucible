@@ -82,7 +82,7 @@ enum Commands {
         /// Disable SVM register tracing for higher throughput (no coverage guidance)
         #[arg(long)]
         no_tracing: bool,
-        /// ItyFuzz-style stateful fuzzing: single action per iteration with state pool
+        /// Stateful fuzzing: single action per iteration with state pool
         #[arg(long)]
         stateful: bool,
         /// Maximum state depth (action chain length) in stateful mode (default: 15)
@@ -510,6 +510,15 @@ fn fuzz_run(
         }
     }
 
+    if coverage && cores.is_some() {
+        bail!(
+            "--coverage cannot be combined with -j/--cores. LCOV collection is single-core only \
+             (the multi-core launcher path uses a shared-memory server that bypasses LCOV output, \
+             and on macOS the served-shmem unix socket bind is blocked by the app sandbox). \
+             Re-run without -j to collect coverage."
+        );
+    }
+
     let cwd = current_dir()?;
     let fuzz_dir = resolve_fuzz_dir(&harness_dir.clone().unwrap_or(cwd.clone()), program_name)?;
 
@@ -651,7 +660,7 @@ fn fuzz_run(
 
     if stateful {
         cmd.env("FUZZ_STATEFUL", "1");
-        println!("[FUZZ] Stateful mode: ItyFuzz-style single action per iteration with state pool");
+        println!("[FUZZ] Stateful mode: single action per iteration with state pool");
     }
 
     if let Some(depth) = max_depth {

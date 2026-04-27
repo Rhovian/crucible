@@ -6,8 +6,16 @@ use quote::quote;
 pub fn coverage_state_code() -> proc_macro2::TokenStream {
     quote! {
         pub const MAP_SIZE: usize = 1 << 16;
-        pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 16;    // 64KB = 512K bits for edges
-        pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 16;  // 64KB = 512K bits for branches
+        // R37 bump: 1<<16 → 1<<18 to reduce mix_hash-mod-bitmap collisions.
+        // At ~14k unique edges (phoenix-eternal), 256K bits → 5.3% pairwise
+        // collision rate (~1-2% undercount); 1M bits → 1.4% (~0.5% undercount).
+        // Cache: 256KB total vs 64KB — still L2-resident. Multi-worker cache-
+        // line ping-pong actually IMPROVES with a bigger bitmap (better hash
+        // spread → fewer workers hitting the same cache line), so no runtime
+        // cost. count_shared_bits popcount is O(bitmap_size) but runs once
+        // per export (~200μs instead of ~50μs), imperceptible.
+        pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 18;    // 256KB = 2M bits (1M for edges, 1M for hitcount buckets)
+        pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 18;  // 256KB = 2M bits for branches
 
         /// Mix bits thoroughly using xxhash-style finalization
         /// This ensures uniform distribution even for clustered inputs like BPF PCs

@@ -227,7 +227,7 @@ fn test_stake_reward_debt_exploit() {
     fuzz_assert_gt!(pending_exploited, rewards1 * 100);
 }
 
-#[anchor_fuzz]
+#[crucible_fuzz]
 fn fuzz_single_stake(fixture: &mut StakingFixture, #[range(0..100_000)] amount: u64) {
     fixture.action_stake(0, amount);
     

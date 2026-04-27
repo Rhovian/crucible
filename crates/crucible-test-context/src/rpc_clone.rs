@@ -338,9 +338,16 @@ impl<'a> AccountCloner<'a> {
             .with_context(|| format!("ProgramData {}", programdata_address))?;
         self.ctx.add_program_from_bytes(program_id, elf_bytes)?;
 
-        // Also write both accounts to SVM so account queries work
-        self.ctx.write_account(program_id, account.clone())?;
+        // Order matters: write the ProgramData account BEFORE the program
+        // account. LiteSVM's `add_account` triggers `load_program(&account)`
+        // for executable accounts owned by BPFLoaderUpgradeab1e, which in
+        // turn looks up the programdata account by pubkey. If programdata
+        // isn't present yet, the load fails with `MissingAccount` and
+        // litesvm logs:
+        //   "Program data account <pk> not found"
+        // Writing programdata first avoids that spurious error.
         self.ctx.write_account(&programdata_address, programdata)?;
+        self.ctx.write_account(program_id, account.clone())?;
 
         Ok(())
     }

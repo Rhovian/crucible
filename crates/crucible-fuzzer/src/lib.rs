@@ -1,6 +1,6 @@
 // crucible-fuzzer/src/lib.rs
 
-pub use crucible_fuzz_macro::anchor_fuzz;
+pub use crucible_fuzz_macro::crucible_fuzz;
 pub use crucible_invariant_macro::fuzz_fixture;
 pub use crucible_invariant_macro::invariant_test;
 pub use crucible_test_context::AccountBuilderBase;
@@ -20,7 +20,7 @@ pub use anchor_lang;
 pub use anchor_spl;
 
 // Re-export fuzz runtime types for structured mutation
-// These are used by generated code from #[fuzz_fixture] and #[anchor_fuzz(structured)]
+// These are used by generated code from #[fuzz_fixture] and #[crucible_fuzz(structured)]
 pub use crucible_fuzz_runtime::ActionGenerator;
 pub use crucible_fuzz_runtime::CrossoverMutator;
 pub use crucible_fuzz_runtime::FuzzAction;

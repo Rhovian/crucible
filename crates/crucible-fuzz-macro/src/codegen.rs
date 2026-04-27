@@ -70,7 +70,7 @@ pub fn template_setup(
         // Always enable tracing for initial fixture setup so corpus loading
         // establishes a coverage baseline. If --no-tracing is set, we switch to
         // a non-instrumented SVM after corpus loading completes.
-        std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+        std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
         let template_fixture = #fixture_name::setup();
 
         // Debug: verify accounts exist in template after setup
@@ -466,38 +466,47 @@ pub fn contexts_swap_back(
     quote! { #(#stmts)* }
 }
 
-/// No-tracing switch: recreate fixture without JIT instrumentation and
-/// replace both pristine and saved SVMs for all contexts.
+/// No-tracing switch: rebuild each saved SVM as non-debuggable with the
+/// same accounts/state, matching the stateful-mode approach.
+///
+/// The prior implementation called `#fixture_name::setup()` again, but
+/// fixtures that use random keypairs would produce new pubkeys that
+/// diverged from the template fixture's Rust state — causing
+/// "Account not found" panics when actions referenced the old pubkeys.
+///
+/// Instead, create a fresh non-debuggable `LiteSVM` and replay the
+/// template's snapshot into it. Pubkeys stay identical; only the SVM's
+/// JIT instrumentation flag changes.
 pub fn contexts_no_tracing_switch(
-    fixture_name: &syn::Ident,
+    _fixture_name: &syn::Ident,
     contexts: &[syn::Ident],
 ) -> proc_macro2::TokenStream {
-    let take_snapshots: Vec<_> = contexts
-        .iter()
-        .map(|field| quote! { __new_fixture.#field.take_snapshot(); })
-        .collect();
-    let swap_svms: Vec<_> = contexts
+    let rebuild_svms: Vec<_> = contexts
         .iter()
         .enumerate()
         .map(|(i, field)| {
             let pristine = quote::format_ident!("__pristine_svm_{}", i);
             let saved = quote::format_ident!("__saved_svm_{}", i);
             quote! {
-                *#pristine.borrow_mut() = __new_fixture.#field.svm.clone();
-                *#saved.borrow_mut() = std::mem::replace(
-                    &mut __new_fixture.#field.svm,
-                    crucible_test_context::litesvm::LiteSVM::new(),
-                );
+                {
+                    let mut __fast_svm = crucible_test_context::litesvm::LiteSVM::new()
+                        .with_transaction_history(0)
+                        .with_sigverify(false)
+                        .with_blockhash_check(false);
+                    if let Some(ref __snap) = template_fixture.#field.snapshot {
+                        __snap.restore_full(&mut __fast_svm);
+                    }
+                    *#pristine.borrow_mut() = __fast_svm.clone();
+                    *#saved.borrow_mut() = __fast_svm;
+                }
             }
         })
         .collect();
     quote! {
         if std::env::var("FUZZ_NO_TRACING").is_ok() {
-            std::env::remove_var("ANCHOR_FUZZ_DEBUGGABLE");
+            std::env::remove_var("CRUCIBLE_FUZZ_DEBUGGABLE");
             eprintln!("[FUZZ] Corpus loaded with tracing. Switching to no-tracing mode for fuzzing.");
-            let mut __new_fixture = #fixture_name::setup();
-            #(#take_snapshots)*
-            #(#swap_svms)*
+            #(#rebuild_svms)*
         }
     }
 }
@@ -745,7 +754,7 @@ mod tests {
         let mod_name = format_ident!("__fuzz_mod");
         let output = ts(template_setup(&fixture, &mod_name));
         assert!(
-            output.contains("ANCHOR_FUZZ_DEBUGGABLE"),
+            output.contains("CRUCIBLE_FUZZ_DEBUGGABLE"),
             "should enable tracing env var"
         );
         assert!(output.contains("setup"), "should call Fixture::setup()");
@@ -937,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn contexts_no_tracing_switch_recreates_all() {
+    fn contexts_no_tracing_switch_rebuilds_all() {
         let fixture = format_ident!("TestFixture");
         let contexts = vec![format_ident!("ctx"), format_ident!("ctx_b")];
         let output = ts(contexts_no_tracing_switch(&fixture, &contexts));
@@ -950,10 +959,13 @@ mod tests {
             "should remove debuggable env var"
         );
         assert!(
-            output.contains("TestFixture :: setup"),
-            "should recreate fixture"
+            output.contains("restore_full"),
+            "should restore accounts from template snapshot into the fast SVM"
         );
-        assert!(output.contains("take_snapshot"), "should re-snapshot");
+        assert!(
+            output.contains("LiteSVM :: new"),
+            "should build a fresh non-debuggable LiteSVM"
+        );
         assert!(
             output.contains("__pristine_svm_0"),
             "should update pristine ctx"

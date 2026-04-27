@@ -14,13 +14,13 @@ mod multicore;
 mod singlecore;
 mod stateful;
 
-/// Parsed arguments for `#[anchor_fuzz(...)]`
+/// Parsed arguments for `#[crucible_fuzz(...)]`
 ///
 /// Supports:
-/// - `#[anchor_fuzz]` — default: arbitrary mode, contexts = [ctx]
-/// - `#[anchor_fuzz(structured)]` — structured mutation mode
-/// - `#[anchor_fuzz(contexts = [ctx, ctx_b])]` — multiple TestContext fields
-/// - `#[anchor_fuzz(structured, contexts = [ctx, ctx_b])]` — both
+/// - `#[crucible_fuzz]` — default: arbitrary mode, contexts = [ctx]
+/// - `#[crucible_fuzz(structured)]` — structured mutation mode
+/// - `#[crucible_fuzz(contexts = [ctx, ctx_b])]` — multiple TestContext fields
+/// - `#[crucible_fuzz(structured, contexts = [ctx, ctx_b])]` — both
 #[derive(Debug)]
 struct FuzzArgs {
     structured: bool,
@@ -87,7 +87,7 @@ fn extract_vec_inner_type(ty: &Type) -> Option<Type> {
 }
 
 #[proc_macro_attribute]
-pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
+pub fn crucible_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
     // Parse attribute arguments: structured, contexts = [field1, field2, ...]
     let fuzz_args: FuzzArgs = if args.is_empty() {
         FuzzArgs::default()
@@ -245,14 +245,14 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
         if params.len() != 1 {
             return syn::Error::new_spanned(
                 &input_fn.sig,
-                "#[anchor_fuzz(structured)] requires exactly 2 parameters: (fixture: &mut Fixture, actions: Vec<ActionType>)"
+                "#[crucible_fuzz(structured)] requires exactly 2 parameters: (fixture: &mut Fixture, actions: Vec<ActionType>)"
             ).to_compile_error().into();
         }
         let inner = extract_vec_inner_type(&params[0].ty);
         if inner.is_none() {
             return syn::Error::new_spanned(
                 &input_fn.sig,
-                "#[anchor_fuzz(structured)] second parameter must be Vec<ActionType>",
+                "#[crucible_fuzz(structured)] second parameter must be Vec<ActionType>",
             )
             .to_compile_error()
             .into();
@@ -330,7 +330,7 @@ pub fn anchor_fuzz(args: TokenStream, item: TokenStream) -> TokenStream {
             .collect();
     }
 
-    let mod_name = quote::format_ident!("__anchor_fuzz_rt_{}", fn_name);
+    let mod_name = quote::format_ident!("__crucible_fuzz_rt_{}", fn_name);
 
     // Generate coverage-related code from coverage module
     let coverage_code = coverage::all_coverage_code();

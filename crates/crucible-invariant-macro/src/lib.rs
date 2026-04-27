@@ -1332,7 +1332,7 @@ pub fn invariant_test(args: TokenStream, item: TokenStream) -> TokenStream {
 
     let test_name_str = fn_name.to_string();
 
-    let fuzz_attr = quote! { #[anchor_fuzz(structured)] };
+    let fuzz_attr = quote! { #[crucible_fuzz(structured)] };
 
     let expanded = quote! {
         #fuzz_attr

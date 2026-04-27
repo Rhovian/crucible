@@ -4,7 +4,7 @@
 //! correctly generalizes over N `TestContext` fields instead of using
 //! hardcoded `self_b` references from the old feature/diff branch.
 //!
-//! Since `#[anchor_fuzz]` generates a `main()` function (incompatible with
+//! Since `#[crucible_fuzz]` generates a `main()` function (incompatible with
 //! `#[test]` harness), we verify correctness at the source/codegen level:
 //! - Helpers iterate over the full `contexts` slice (normal mode)
 //! - Helpers skip(1) for additional contexts (stateful mode)
