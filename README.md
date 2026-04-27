@@ -81,7 +81,3 @@ crucible run <program_name> <test_name> --release
 ## License
 
 Licensed under the [MIT License](LICENSE).
-
----
-
-For contributors and maintainers, see [CLAUDE.md](CLAUDE.md).
