@@ -4592,22 +4592,10 @@ mod tests {
 
     /// Find any valid SBF .so in the repo for testing.
     fn find_test_so() -> String {
-        let candidates = [
-            "examples/staking/target/deploy/staking.so",
-            "examples/whirlpools/whirlpool.so",
-        ];
-        for c in &candidates {
-            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join(c);
-            if p.exists() {
-                return p.to_string_lossy().into_owned();
-            }
-        }
-        panic!("No test .so found — build examples/staking first");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data/staking.so")
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]

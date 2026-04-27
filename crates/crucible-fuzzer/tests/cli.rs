@@ -127,35 +127,6 @@ fn test_init_idempotent() {
 // =============================================================================
 
 #[test]
-fn test_run_dry_run() {
-    ensure_cli_built();
-
-    // Use marginfi example which should be set up
-    let marginfi_path = project_root().join("examples/marginfi-v2-fuzz");
-    if !marginfi_path.exists() {
-        eprintln!("Skipping test_run_dry_run: marginfi example not found");
-        return;
-    }
-
-    let output = run_crucible_in(
-        &marginfi_path,
-        &["run", "marginfi-v2-fuzz", "invariant_test", "--dry-run"],
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    // Dry-run should print validation message
-    assert!(
-        stdout.contains("Dry-run")
-            || stderr.contains("Dry-run")
-            || stdout.contains("dry-run")
-            || stderr.contains("dry-run"),
-        "output should mention dry-run mode, stdout: {stdout}, stderr: {stderr}",
-    );
-}
-
-#[test]
 fn test_run_nonexistent_harness() {
     ensure_cli_built();
 

@@ -69,16 +69,6 @@ pub fn parse_exec_sec(output: &str) -> Option<f64> {
     None
 }
 
-/// Get the marginfi-v2-fuzz example path
-pub fn marginfi_example_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent() // crates/
-        .unwrap()
-        .parent() // workspace root
-        .unwrap()
-        .join("examples/marginfi-v2-fuzz")
-}
-
 /// Get the test-program path for performance tests
 pub fn test_program_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-program")
