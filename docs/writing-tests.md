@@ -58,6 +58,8 @@ pub fn action_deposit(&mut self, amount: u64) -> Result<()> {
 }
 ```
 
+For non-Anchor programs or hand-rolled instructions, use `ctx.raw_call(instruction)` instead of the typed `ctx.program(..).call(..)` builder. See [API Reference › Raw Instruction Calls](api-reference.md#raw-instruction-calls).
+
 ### After-Action Callback
 
 ```rust

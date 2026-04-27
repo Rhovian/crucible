@@ -4,6 +4,7 @@ target/
 
 # Fuzzing artifacts
 crashes/
+corpus/
 *.lcov
 coverage.html/
 .fuzz-cache/

@@ -1,5 +1,19 @@
 # TestContext API Reference
 
+## Index
+
+- [Program Loading](#program-loading) — `add_program`
+- [Account Creation](#account-creation) — `create_account`, `create_mint`, `create_token_account`
+- [Program Calls](#program-calls) — `program(...).call(...).accounts(...).signers(...).send()`
+- [Transaction Results (`TxOutcome`)](#transaction-results-txoutcome)
+- [Raw Instruction Calls](#raw-instruction-calls) — `raw_call` for non-Anchor / custom instructions
+- [Transaction Batching](#transaction-batching) — `add_transaction`, `send_batch`
+- [Account Reading/Writing](#account-readingwriting) — `read_anchor_account`, `update_account`, zero-copy helpers
+- [RPC Account Cloning](#rpc-account-cloning) — `clone_from_rpc`, `clone_account(s)`
+- [Time Control](#time-control) — `slot`, `warp_to_slot`, `advance_slots`
+- [Mock Pyth Oracles](#mock-pyth-oracles)
+- [Fixture Hooks](#fixture-hooks) — `setup`, `after_action` (see also [Writing Tests](writing-tests.md))
+
 ## Program Loading
 
 ```rust
@@ -244,3 +258,12 @@ let oracle = ctx.create_mock_pyth_oracle()
 ctx.update_pyth_price(&oracle, 95_00000000, -8)?;
 ctx.refresh_pyth_oracle(&oracle)?;
 ```
+
+## Fixture Hooks
+
+`#[fuzz_fixture]` recognises a few special method names on the fixture impl:
+
+- `setup() -> Self` — required. Builds the initial state once per iteration (stateless) or once per state-pool entry (stateful).
+- `action_*` — fuzz-discovered actions, see [Writing Tests › Action Naming Convention](writing-tests.md#action-naming-convention).
+- `after_action(&self)` — optional. Called after every action dispatch. Useful for diagnostic logging or state stats. See [Writing Tests › After-Action Callback](writing-tests.md#after-action-callback).
+
