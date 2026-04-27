@@ -172,7 +172,7 @@ Stateful mode (`--stateful`) uses a state-pool approach where each fuzzer iterat
 - States form a tree: each state has a parent and a depth (action chain length)
 - New states are created by applying an action to an existing state
 - The state pool is bounded; states are evicted based on coverage novelty
-- `--max-depth <N>` controls maximum chain length (default: 15)
+- `--max-depth <N>` controls maximum chain length (default: 100)
 - Works with both single-core and multi-core (`-j N`)
 - Crashes record the full action chain from root to violation
 
@@ -181,7 +181,7 @@ Stateful mode (`--stateful`) uses a state-pool approach where each fuzzer iterat
 crucible run myproject invariant_test --release --stateful
 
 # With custom depth limit
-crucible run myproject invariant_test --release --stateful --max-depth 20
+crucible run myproject invariant_test --release --stateful --max-depth 50
 
 # Multi-core stateful
 crucible run myproject invariant_test --release --stateful -j 4

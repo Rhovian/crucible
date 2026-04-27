@@ -132,6 +132,43 @@ let account: Account = ctx.get_account(&address)?;
 ctx.write_anchor_account(&address, &my_data)?;
 ```
 
+Read-modify-write a single account atomically:
+
+```rust
+ctx.update_account(&address, |account| {
+    account.lamports += 1_000_000;
+    Ok(())
+})?;
+```
+
+Check whether an account exists with at least `min_size` bytes of data (useful in invariants that need to skip uninitialized accounts):
+
+```rust
+if ctx.account_has_data(&pubkey, 8) {
+    let data: MyAccount = ctx.read_anchor_account(&pubkey)?;
+    // ...
+}
+```
+
+### Zero-Copy Accounts
+
+For accounts using `bytemuck`/zero-copy layouts. Default discriminator length is 8 bytes; use the `_with_discriminator` variants for non-Anchor zero-copy formats.
+
+```rust
+let pool: Pool = ctx.read_zero_copy_account(&pool_address)?;
+ctx.write_zero_copy_account(&pool_address, &updated_pool)?;
+
+// Custom discriminator length (e.g., 0 for raw layouts):
+let raw: RawState = ctx.read_zero_copy_account_with_discriminator(&address, 0)?;
+ctx.write_zero_copy_account_with_discriminator(&address, &raw, 0)?;
+```
+
+### SPL Token Balance
+
+```rust
+let amount = ctx.token_balance(&token_account_address);
+```
+
 ## RPC Account Cloning
 
 Clone accounts directly from mainnet/devnet into your test environment. Accounts are cached to disk in `.fuzz-cache/accounts/` - subsequent runs load from cache without RPC calls.

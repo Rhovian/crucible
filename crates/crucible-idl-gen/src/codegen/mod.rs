@@ -76,8 +76,7 @@ pub fn idl_type_to_tokens(ty: &anchor_lang_idl::types::IdlType) -> proc_macro2::
             let ident = quote::format_ident!("{}", name);
             quote! { #ident }
         }
-        // Handle other variants as needed
-        _ => quote! { () }, // Fallback
+        _ => panic!("Unsupported IDL type in codegen: {ty:?}"),
     }
 }
 

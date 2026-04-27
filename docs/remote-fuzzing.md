@@ -28,7 +28,7 @@ A minimal remote fuzzing bundle for a Crucible harness needs:
 }
 ```
 
-The standard driver appends `--mode <mode>`, `--cores <N>`, and `--max-memory-kib <N>` to the sub-command. Crucible accepts all three. `--max-memory-kib` is parsed but not currently enforced.
+The standard driver appends `--mode <mode>` and `--cores <N>` to the sub-command. Crucible accepts both.
 
 ---
 
@@ -37,7 +37,7 @@ The standard driver appends `--mode <mode>`, `--cores <N>`, and `--max-memory-ki
 The driver invokes:
 
 ```
-<bundle>/bin/crucible run <program> <test> --release --mode <mode> --cores <N> --max-memory-kib <N>
+<bundle>/bin/crucible run <program> <test> --release --mode <mode> --cores <N>
 ```
 
 Crucible's `--mode` flag translates each mode into native flags before the underlying harness binary is launched. All standard Crucible flags (`--corpus-in`, `--crashes-out`, etc.) can still be passed alongside `--mode` to override defaults.
@@ -264,7 +264,7 @@ The standard driver manifest is a JSON object:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `executable_path_in_bundle` | Yes | Relative path to the `crucible` binary in the bundle |
-| `executable_sub_command` | Yes | Arguments passed before `--mode`, `--cores`, `--max-memory-kib` |
+| `executable_sub_command` | Yes | Arguments passed before `--mode` and `--cores` |
 | `supported_tasks` | Yes | Which modes the harness supports |
 | `extra` | No | Environment variables set before invocation |
 | `coverage.kind` | If coverage | `"lcov"` for Crucible |
@@ -347,9 +347,8 @@ The standard driver appends these flags to every invocation:
 |------|--------|------------------------|
 | `--mode <mode>` | Driver | Translated into native Crucible flags (see mode table above) |
 | `--cores <N>` | Driver | Passed to `-j N` for multi-core fuzzing |
-| `--max-memory-kib <N>` | Driver | Parsed and accepted; **not enforced** (no memory limit applied) |
 
-All three are defined as clap arguments on `crucible run` and will not cause parse errors.
+Both are defined as clap arguments on `crucible run` and will not cause parse errors.
 
 ---
 

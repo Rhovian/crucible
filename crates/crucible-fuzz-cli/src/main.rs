@@ -106,9 +106,6 @@ enum Commands {
         /// Show detailed performance stats (profiling, memory, pick/exec breakdown)
         #[arg(long)]
         stats: bool,
-        /// Maximum memory in KiB (passed by remote driver, accepted but not enforced)
-        #[arg(long)]
-        max_memory_kib: Option<u64>,
     },
     /// List available fuzz tests
     List {
@@ -233,7 +230,6 @@ fn main() -> Result<()> {
             stats,
             mode,
             lcov_out,
-            max_memory_kib: _,
         } => fuzz_run(
             &program_name,
             &test_name,
