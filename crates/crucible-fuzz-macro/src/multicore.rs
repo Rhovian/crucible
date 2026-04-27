@@ -634,12 +634,9 @@ pub fn multicore_mode(
                     let ok_before = crucible_test_context::TOTAL_ACTIONS_SUCCEEDED
                         .load(std::sync::atomic::Ordering::Relaxed);
 
-                    let __input_bytes_for_slow = input.target_bytes();
-                    crucible_test_context::set_current_input_bytes(__input_bytes_for_slow.as_slice());
                     let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         #fn_name(#(#call_args),*);
                     }));
-                    crucible_test_context::clear_current_input_bytes();
 
                     // Collect success pattern from action history for SuccessPatternFeedback
                     {

@@ -60,9 +60,7 @@ impl InstructionBuilder<'_> {
             &fee_payer,
             self.ctx.sigverify,
         )?;
-        let __svm_elapsed = __t_svm.elapsed();
-        crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __svm_elapsed.as_nanos() as u64));
-        crate::maybe_record_slow_tx(__svm_elapsed.as_micros(), "raw_call.send");
+        crate::SEND_BATCH_SVM_NS.with(|c| c.set(c.get() + __t_svm.elapsed().as_nanos() as u64));
 
         // Post-tx: outcome parsing
         let __t_post = std::time::Instant::now();

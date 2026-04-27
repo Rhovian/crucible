@@ -119,11 +119,10 @@ pub fn singlecore_mode(
             let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
             #fixture_param_name.ctx.set_invocation_callback(callback);
 
-            crucible_test_context::set_current_input_bytes(slice);
+            // Wrap test function in catch_unwind so panics print location and exit cleanly
             let __panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 #fn_name(#(#call_args),*);
             }));
-            crucible_test_context::clear_current_input_bytes();
 
             // Collect success pattern from action history for SuccessPatternFeedback
             {
