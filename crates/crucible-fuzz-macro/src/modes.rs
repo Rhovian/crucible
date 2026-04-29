@@ -1,9 +1,10 @@
-//! Execution modes for the anchor-fuzz macro.
+//! Execution modes for the crucible-fuzz macro.
 //!
 //! This module contains code generation for different execution modes:
 //! - Dry-run mode: Validate harness setup with a single iteration
 //! - Input replay mode: Replay a specific input file
 //! - Coverage-only mode: Run corpus once for coverage report
+//! - Tmin mode: Minimize a crash to smallest reproducing action sequence
 
 use quote::quote;
 
@@ -16,9 +17,24 @@ pub fn dry_run_mode(
     fn_name: &syn::Ident,
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
     let init_program_binaries = codegen::init_program_binaries(mod_name);
+
+    // For structured mode, simple_deser_stmts reference __raw_bytes
+    // For arbitrary mode, they reference u (Unstructured)
+    let deser_block = if structured {
+        quote! {
+            let __raw_bytes = seed_bytes;
+            #(#simple_deser_stmts)*
+        }
+    } else {
+        quote! {
+            let mut u = Unstructured::new(&seed_bytes);
+            #(#simple_deser_stmts)*
+        }
+    };
 
     quote! {
         // === DRY-RUN MODE ===
@@ -28,7 +44,7 @@ pub fn dry_run_mode(
             eprintln!("[DRY-RUN] Validating harness setup...");
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             let template_fixture = #fixture_name::setup();
@@ -78,9 +94,7 @@ pub fn dry_run_mode(
                 vec![0u8; 256]
             };
 
-            let mut u = Unstructured::new(&seed_bytes);
-
-            #(#simple_deser_stmts)*
+            #deser_block
 
             #fn_name(#(#call_args),*);
 
@@ -105,18 +119,81 @@ pub fn replay_mode(
     fn_name: &syn::Ident,
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
+    action_type: Option<&proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
+
+    // For structured mode, simple_deser_stmts reference __raw_bytes
+    let deser_block = if structured {
+        quote! {
+            let __raw_bytes = input_bytes;
+            #(#simple_deser_stmts)*
+        }
+    } else {
+        quote! {
+            let mut u = Unstructured::new(&input_bytes);
+            #(#simple_deser_stmts)*
+        }
+    };
+
+    // Partial deserialization fallback: reconstruct from .meta.json when binary deserialization fails
+    let partial_deser_warning = if structured {
+        let action_ty = action_type.unwrap();
+        quote! {
+            // Detect partial deserialization (harness may have changed since crash)
+            let __expected_actions = if __raw_bytes.len() >= 4 {
+                let raw = u32::from_le_bytes(__raw_bytes[0..4].try_into().unwrap()) as usize;
+                raw.min(256)
+            } else { 0 };
+            let __actual_actions = param_1.len();
+            if __actual_actions < __expected_actions {
+                eprintln!("[REPLAY] Binary deserialized {}/{} actions — attempting .meta.json reconstruction",
+                    __actual_actions, __expected_actions);
+
+                // Try to load actions from .meta.json (stable across enum reorderings)
+                let __meta_path = format!("{}.meta.json", input_path);
+                let __reconstructed = (|| -> Option<Vec<#action_ty>> {
+                    let meta_bytes = std::fs::read(&__meta_path).ok()?;
+                    let meta: crucible_test_context::serde_json::Value =
+                        crucible_test_context::serde_json::from_slice(&meta_bytes).ok()?;
+                    let actions_arr = meta.get("actions")?.as_array()?;
+                    let mut reconstructed = Vec::with_capacity(actions_arr.len());
+                    for action_obj in actions_arr {
+                        let name = action_obj.get("name")?.as_str()?;
+                        let params = action_obj.get("params").cloned()
+                            .unwrap_or(crucible_test_context::serde_json::json!({}));
+                        if let Some(action) = <#action_ty as crucible_fuzzer::FuzzAction>::from_name_and_params(name, &params) {
+                            reconstructed.push(action);
+                        } else {
+                            eprintln!("[REPLAY] Could not reconstruct action '{}' — unknown or incompatible params", name);
+                            return None;
+                        }
+                    }
+                    Some(reconstructed)
+                })();
+
+                if let Some(actions) = __reconstructed {
+                    eprintln!("[REPLAY] Reconstructed {} actions from .meta.json", actions.len());
+                    param_1 = actions;
+                } else {
+                    eprintln!("[REPLAY] [WARN] Could not reconstruct from .meta.json");
+                    eprintln!("[REPLAY] Crash may not reproduce correctly");
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     quote! {
         // === SINGLE INPUT REPLAY MODE ===
         // Replay a specific input file and report the outcome
         if let Some(ref input_path) = input_file {
-            eprintln!("[REPLAY] Loading input from: {}", input_path);
-
             let input_bytes = match std::fs::read(input_path) {
                 Ok(bytes) => bytes,
                 Err(e) => {
+                    println!("[FUZZ_ERROR] Failed to read input file: {}", e);
                     eprintln!("[REPLAY] Failed to read input file: {}", e);
                     std::process::exit(1);
                 }
@@ -125,7 +202,7 @@ pub fn replay_mode(
             eprintln!("[REPLAY] Input size: {} bytes", input_bytes.len());
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             let template_fixture = #fixture_name::setup();
@@ -142,25 +219,26 @@ pub fn replay_mode(
             crucible_test_context::set_current_iteration(0);
 
             // Parse input and run test
-            let mut u = Unstructured::new(&input_bytes);
+            #deser_block
 
-            #(#simple_deser_stmts)*
+            #partial_deser_warning
 
             // Clear any previous action sequence
             crucible_test_context::clear_action_history();
 
-            eprintln!("[REPLAY] Executing test...");
             #fn_name(#(#call_args),*);
 
             // Check for crash/violation
-            if let Some(msg) = crucible_test_context::take_violation() {
-                eprintln!("[REPLAY] CRASH REPRODUCED!");
-                eprintln!("[REPLAY] Violation: {}", msg);
+            let violation_msg = crucible_test_context::take_violation();
+
+            if let Some(msg) = violation_msg {
+                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
                 crucible_test_context::print_action_sequence();
+                eprintln!("[INVARIANT] {}", msg);
                 std::process::exit(1);
             } else {
-                eprintln!("[REPLAY] Test completed without crash");
-                eprintln!("[REPLAY] Note: If you expected a crash, the input may be from a different harness version");
+                println!("[FUZZ_FINDING] reproduces:false summary:did not reproduce");
+                eprintln!("did not reproduce");
                 crucible_test_context::print_action_sequence();
                 std::process::exit(0);
             }
@@ -175,9 +253,24 @@ pub fn coverage_only_mode(
     fn_name: &syn::Ident,
     simple_deser_stmts: &[proc_macro2::TokenStream],
     call_args: &[proc_macro2::TokenStream],
+    structured: bool,
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
     let init_program_binaries = codegen::init_program_binaries(mod_name);
+    let init_dwarf = codegen::init_dwarf_maps(mod_name);
+
+    // For structured mode, simple_deser_stmts reference __raw_bytes
+    let deser_block = if structured {
+        quote! {
+            let __raw_bytes = input_bytes.clone();
+            #(#simple_deser_stmts)*
+        }
+    } else {
+        quote! {
+            let mut u = Unstructured::new(&input_bytes);
+            #(#simple_deser_stmts)*
+        }
+    };
 
     quote! {
         // === COVERAGE-ONLY MODE ===
@@ -186,6 +279,7 @@ pub fn coverage_only_mode(
             let corpus_dir = match &corpus_in_dir {
                 Some(dir) => dir.clone(),
                 None => {
+                    println!("[FUZZ_ERROR] --corpus-in required for coverage-only mode");
                     eprintln!("[COVERAGE-ONLY] Error: --corpus-in required for coverage-only mode");
                     std::process::exit(1);
                 }
@@ -216,16 +310,17 @@ pub fn coverage_only_mode(
             }
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             #mod_name::COVERAGE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
             let template_fixture = #fixture_name::setup();
 
-            // Initialize coverage totals and binaries (for LCOV output)
+            // Initialize coverage totals, binaries, and DWARF source maps (for LCOV output)
             {
                 #init_coverage_totals
                 #init_program_binaries
+                #init_dwarf
             }
 
             // Process each input file
@@ -249,12 +344,9 @@ pub fn coverage_only_mode(
                 let mut fixture = template_fixture.clone();
                 fixture.ctx.set_invocation_callback(callback);
 
-                // Create fresh Unstructured for parsing
-                let mut u = Unstructured::new(&input_bytes);
-
                 // Run the test in a closure to handle deserialization failures
                 let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    #(#simple_deser_stmts)*
+                    #deser_block
 
                     #fn_name(#(#call_args),*);
                 }));
@@ -276,7 +368,13 @@ pub fn coverage_only_mode(
 
             // Write coverage output
             let coverage_output = std::env::var("FUZZ_COVERAGE_OUT")
-                .unwrap_or_else(|_| "coverage.lcov".to_string());
+                .unwrap_or_else(|_| {
+                    if std::path::Path::new("./output").is_dir() {
+                        "./output/coverage.lcov".to_string()
+                    } else {
+                        "coverage.lcov".to_string()
+                    }
+                });
             #mod_name::write_lcov_coverage(&coverage_output);
 
             // Print summary
@@ -299,5 +397,435 @@ pub fn coverage_only_mode(
 
             std::process::exit(0);
         }
+    }
+}
+
+/// Generate the tmin (crash minimization) mode code.
+///
+/// Only works with structured mode (action sequences from #[invariant_test]).
+/// Uses a 1-pass linear removal algorithm:
+/// 1. Truncate actions after the violation index
+/// 2. Try removing each remaining action; keep removal if crash still reproduces
+pub fn tmin_mode(
+    _mod_name: &syn::Ident,
+    fixture_name: &syn::Ident,
+    fn_name: &syn::Ident,
+    structured: bool,
+    action_type: Option<&proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    if !structured {
+        // For non-structured mode, emit a check that prints an error
+        return quote! {
+            if let Ok(_tmin_file) = std::env::var("FUZZ_TMIN_FILE") {
+                eprintln!("[TMIN] ERROR: tmin only supports structured/invariant tests");
+                std::process::exit(1);
+            }
+        };
+    }
+
+    let action_ty = match action_type {
+        Some(ty) => ty,
+        None => {
+            return quote! {
+                if let Ok(_tmin_file) = std::env::var("FUZZ_TMIN_FILE") {
+                    eprintln!("[TMIN] ERROR: tmin requires an action type (structured mode)");
+                    std::process::exit(1);
+                }
+            };
+        }
+    };
+
+    quote! {
+        // === TMIN MODE (Crash Minimization) ===
+        // Supports two modes:
+        //   FUZZ_TMIN_FILE — minimize a single crash file
+        //   FUZZ_TMIN_ALL_DIR — minimize all crashes in a directory (one setup() call)
+        if std::env::var("FUZZ_TMIN_FILE").is_ok() || std::env::var("FUZZ_TMIN_ALL_DIR").is_ok() {
+            // Collect crash files to minimize
+            let crash_files: Vec<(String, std::path::PathBuf)> = if let Ok(all_dir) = std::env::var("FUZZ_TMIN_ALL_DIR") {
+                // --all mode: iterate all crash binaries with .meta.json in the directory
+                let dir = std::path::Path::new(&all_dir);
+                let meta_scan_dir_str = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| all_dir.clone());
+                let meta_scan_dir = std::path::Path::new(&meta_scan_dir_str);
+                let mut files = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(meta_scan_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.ends_with(".meta.json") {
+                                let crash_id = name.strip_suffix(".meta.json").unwrap().to_string();
+                                let binary_path = dir.join(&crash_id);
+                                if binary_path.exists() && binary_path.is_file() {
+                                    files.push((crash_id, binary_path));
+                                }
+                            }
+                        }
+                    }
+                }
+                files.sort_by(|a, b| a.0.cmp(&b.0));
+                eprintln!("[TMIN] Found {} crash(es) to minimize", files.len());
+                files
+            } else {
+                // Single file mode
+                let tmin_file = std::env::var("FUZZ_TMIN_FILE").unwrap();
+                let crash_id = std::env::var("FUZZ_TMIN_CRASH_ID").unwrap_or_default();
+                vec![(crash_id, std::path::PathBuf::from(tmin_file))]
+            };
+
+            let crashes_dir = std::env::var("FUZZ_CRASHES_DIR").unwrap_or_else(|_| "crashes".into());
+            let meta_dir = std::env::var("FUZZ_META_DIR").unwrap_or_else(|_| crashes_dir.clone());
+
+            // Setup fixture once — reused across all crash files.
+            // No tracing needed: tmin only checks for violation, not coverage.
+            let template_fixture = #fixture_name::setup();
+
+            // Helper: suppress stderr during a closure (avoids verbose invariant output during trials)
+            fn with_stderr_suppressed<F: FnOnce() -> R, R>(f: F) -> R {
+                extern "C" {
+                    fn dup(fd: i32) -> i32;
+                    fn dup2(fd1: i32, fd2: i32) -> i32;
+                    fn open(path: *const u8, flags: i32) -> i32;
+                    fn close(fd: i32) -> i32;
+                }
+                const O_WRONLY: i32 = 1;
+                unsafe {
+                    let devnull = open(b"/dev/null\0".as_ptr(), O_WRONLY);
+                    if devnull < 0 { return f(); } // fallback: don't suppress
+                    let saved = dup(2);
+                    dup2(devnull, 2);
+                    close(devnull);
+                    let result = f();
+                    dup2(saved, 2);
+                    close(saved);
+                    result
+                }
+            }
+
+            // Helper: execute an action sequence on a fresh clone, return whether it crashes
+            let crashes = |actions: &[#action_ty], template: &#fixture_name| -> bool {
+                let mut fixture = template.clone();
+                crucible_test_context::clear_iteration_state();
+                let _ = crucible_test_context::take_violation();
+                with_stderr_suppressed(|| #fn_name(&mut fixture, actions.to_vec()));
+                crucible_test_context::has_violation()
+            };
+
+            let total = crash_files.len();
+            let start_time = std::time::Instant::now();
+
+            for (idx, (crash_id, crash_path)) in crash_files.iter().enumerate() {
+                let tmin_file = crash_path.to_str().unwrap();
+                eprintln!("\n[TMIN] [{}/{}] {}", idx + 1, total, crash_id);
+
+                let crash_bytes = match std::fs::read(tmin_file) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[TMIN] ERROR: failed to read {}: {}", tmin_file, e);
+                        continue;
+                    }
+                };
+                let fuzz_input = crucible_fuzzer::FuzzInput::<#action_ty>::from_bytes(&crash_bytes);
+                let original_count = fuzz_input.actions.len();
+
+                if original_count == 0 {
+                    eprintln!("[TMIN] Skipping: no actions");
+                    continue;
+                }
+                eprint!("[TMIN] {} actions", original_count);
+
+                // Verify crash reproduces
+                let mut actions = fuzz_input.actions;
+                if !crashes(&actions, &template_fixture) {
+                    eprintln!(" — does not reproduce, skipping");
+                    continue;
+                }
+
+                // Truncate post-violation actions
+                let violation_idx = crucible_test_context::get_violation_action_index();
+                if let Some(vi) = violation_idx {
+                    if vi + 1 < actions.len() {
+                        actions.truncate(vi + 1);
+                    }
+                }
+
+                // Multi-pass forward removal (loop until convergence)
+                let mut pass = 1;
+                loop {
+                    let len_before_pass = actions.len();
+                    let mut i = 0;
+                    while i < actions.len() {
+                        let removed = actions.remove(i);
+                        if actions.is_empty() || !crashes(&actions, &template_fixture) {
+                            actions.insert(i, removed);
+                            i += 1;
+                        } else {
+                            // action removed successfully, don't increment i
+                        }
+                    }
+                    if actions.len() == len_before_pass {
+                        break;
+                    }
+                    pass += 1;
+                }
+
+                let removed_count = original_count - actions.len();
+                if removed_count == 0 {
+                    eprintln!(" → already minimal");
+                } else {
+                    eprintln!(" → {} actions ({} removed, {} passes)",
+                        actions.len(), removed_count, pass);
+
+                    // Write minimized crash binary
+                    let minimized = crucible_fuzzer::FuzzInput::new(actions.clone());
+                    std::fs::write(tmin_file, &minimized.to_bytes())
+                        .expect("failed to write minimized crash");
+
+                    // Update .meta.json — re-execute to capture clean action history
+                    crucible_test_context::clear_iteration_state();
+                    {
+                        let mut fixture = template_fixture.clone();
+                        with_stderr_suppressed(|| #fn_name(&mut fixture, actions));
+                    }
+                    if !crash_id.is_empty() {
+                        crucible_test_context::write_crash_metadata_for_id(&meta_dir, crash_id, None);
+                    }
+                }
+            }
+
+            let elapsed = start_time.elapsed();
+            eprintln!("\n[TMIN] Done. {} crashes in {:.1}s ({:.1}/s)",
+                total, elapsed.as_secs_f64(), total as f64 / elapsed.as_secs_f64());
+            std::process::exit(0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::format_ident;
+
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    #[test]
+    fn dry_run_checks_dry_run_mode() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(dry_run_mode(&mod_name, &fixture, &fn_name, &[], &[], false));
+        assert!(
+            output.contains("dry_run_mode"),
+            "should check dry_run_mode flag"
+        );
+        assert!(
+            output.contains("DRY-RUN"),
+            "should use DRY-RUN prefix in output"
+        );
+        assert!(output.contains("setup"), "should call setup()");
+    }
+
+    #[test]
+    fn dry_run_supports_coverage() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(dry_run_mode(&mod_name, &fixture, &fn_name, &[], &[], false));
+        assert!(
+            output.contains("coverage_enabled"),
+            "should check coverage flag"
+        );
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should write coverage on exit"
+        );
+    }
+
+    #[test]
+    fn replay_reads_input_file() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(replay_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+            None,
+        ));
+        assert!(output.contains("input_file"), "should check input_file");
+        assert!(output.contains("REPLAY"), "should use REPLAY prefix");
+        assert!(
+            output.contains("reproduces"),
+            "should report reproduction status"
+        );
+    }
+
+    #[test]
+    fn replay_structured_has_partial_deser() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(replay_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("meta.json"),
+            "should attempt .meta.json reconstruction"
+        );
+        assert!(
+            output.contains("from_name_and_params"),
+            "should reconstruct from name+params"
+        );
+    }
+
+    #[test]
+    fn coverage_only_requires_corpus_in() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(coverage_only_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+        ));
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should check for corpus_in_dir"
+        );
+        assert!(
+            output.contains("COVERAGE-ONLY"),
+            "should use COVERAGE-ONLY prefix"
+        );
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should write coverage output"
+        );
+    }
+
+    #[test]
+    fn tmin_non_structured_rejects() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(tmin_mode(&mod_name, &fixture, &fn_name, false, None));
+        assert!(
+            output.contains("only supports structured"),
+            "should reject non-structured"
+        );
+    }
+
+    #[test]
+    fn tmin_structured_has_forward_removal() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("FUZZ_TMIN_FILE"),
+            "should check FUZZ_TMIN_FILE env"
+        );
+        assert!(
+            output.contains("truncate"),
+            "should truncate post-violation actions"
+        );
+        assert!(
+            output.contains("remove"),
+            "should try removing individual actions"
+        );
+        assert!(
+            output.contains("convergence") || output.contains("len_before_pass"),
+            "should loop until convergence"
+        );
+    }
+
+    #[test]
+    fn tmin_supports_all_mode() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("FUZZ_TMIN_ALL_DIR"),
+            "should support --all mode"
+        );
+        assert!(
+            output.contains("meta.json"),
+            "should iterate .meta.json files"
+        );
+    }
+
+    #[test]
+    fn tmin_suppresses_stderr() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let action_ty = quote::quote! { TestAction };
+        let output = ts(tmin_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            true,
+            Some(&action_ty),
+        ));
+        assert!(
+            output.contains("with_stderr_suppressed"),
+            "should suppress stderr during trials"
+        );
+        assert!(output.contains("dev/null"), "should redirect to /dev/null");
+    }
+
+    #[test]
+    fn coverage_only_processes_all_inputs() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(coverage_only_mode(
+            &mod_name,
+            &fixture,
+            &fn_name,
+            &[],
+            &[],
+            false,
+        ));
+        assert!(
+            output.contains("is_corpus_input"),
+            "should filter using is_corpus_input"
+        );
+        assert!(
+            output.contains("catch_unwind"),
+            "should catch panics from deserialization"
+        );
+        assert!(
+            output.contains("take_violation"),
+            "should clear violation flag"
+        );
     }
 }

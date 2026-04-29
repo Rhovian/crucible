@@ -21,7 +21,7 @@ custom-panic = []
 
 
 [dependencies]
-anchor-lang = { git = "https://github.com/asymmetric-research/anchor-fuzzing", branch = "feature/fuzzing" }
+anchor-lang = "1.0.1"
 
 
 [lints.rust]

@@ -1,8 +1,4 @@
-//! Corpus management for the anchor-fuzz macro.
-//!
-//! This module contains code generation for corpus-related operations:
-//! - Corpus minimization (cmin mode)
-//! - Corpus loading utilities
+//! Corpus management: cmin mode and corpus loading utilities.
 
 use quote::quote;
 
@@ -17,6 +13,14 @@ pub fn cmin_mode(
     call_args: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
     let init_coverage_totals = codegen::init_coverage_totals(mod_name);
+
+    // The simple_deser_stmts may reference either `u` (Unstructured) or `__raw_bytes` (structured)
+    // We create both and let the stmts use whichever they need
+    let deser_block = quote! {
+        let __raw_bytes = input_bytes.clone();
+        let mut u = arbitrary::Unstructured::new(&input_bytes);
+        #(#simple_deser_stmts)*
+    };
 
     quote! {
         // === CORPUS MINIMIZATION MODE (CMIN) ===
@@ -63,7 +67,7 @@ pub fn cmin_mode(
             }
 
             // Setup tracing for coverage
-            std::env::set_var("ANCHOR_FUZZ_DEBUGGABLE", "1");
+            std::env::set_var("CRUCIBLE_FUZZ_DEBUGGABLE", "1");
 
             // Run setup
             let template_fixture = #fixture_name::setup();
@@ -96,32 +100,32 @@ pub fn cmin_mode(
 
                 // Create fresh fixture for each input
                 // Use set_invocation_callback to avoid double SVM clone (critical for performance)
-                let callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+                let mut callback = #mod_name::FuzzCallback::from_raw(cov_ptr, #mod_name::MAP_SIZE);
+                // Skip global COVERAGE_STATE lock — cmin doesn't use it
+                callback.set_skip_global_state(true);
                 let mut fixture = template_fixture.clone();
                 fixture.ctx.set_invocation_callback(callback);
 
-                // Create fresh Unstructured for parsing
-                let mut u = Unstructured::new(&input_bytes);
+                // Enable exact edge tracking (immune to u8 wrapping in the AFL map)
+                #mod_name::cmin_edge_set_enable();
 
                 // Run the test in a closure to handle deserialization failures
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    #(#simple_deser_stmts)*
+                    #deser_block
                     #fn_name(#(#call_args),*);
                 }));
 
                 // Clear any violation flag
                 let _ = crucible_test_context::take_violation();
 
-                // Collect edges hit by this input from the coverage map
-                let mut edges: std::collections::HashSet<u64> = std::collections::HashSet::new();
-                unsafe {
-                    let map = std::slice::from_raw_parts(cov_ptr, #mod_name::MAP_SIZE);
-                    for (edge_idx, &count) in map.iter().enumerate() {
-                        if count > 0 {
-                            edges.insert(edge_idx as u64);
-                        }
-                    }
-                }
+                // Collect edges from the exact edge set (not the u8 AFL map).
+                // The set tracks unique (pc, target_pc) pairs — the same metric
+                // as COVERAGE_STATE.edges used by the normal fuzzing monitor.
+                // This is immune to both u8 wrapping and AFL map index inflation
+                // from context-sensitivity (prev_location XOR).
+                let edges: std::collections::HashSet<u64> = #mod_name::cmin_edge_set_take()
+                    .map(|set| set.into_iter().collect())
+                    .unwrap_or_default();
 
                 if !edges.is_empty() {
                     edges_per_input.push(edges);
@@ -147,44 +151,16 @@ pub fn cmin_mode(
             // Phase 2: Greedy set-cover algorithm
             eprintln!("[CMIN] Phase 2: Computing minimum corpus...");
 
-            let mut uncovered: std::collections::HashSet<u64> = all_edges.clone();
-            let mut selected: Vec<usize> = Vec::new();
-            let mut used: Vec<bool> = vec![false; edges_per_input.len()];
-
-            while !uncovered.is_empty() {
-                // Find input that covers the most uncovered edges
-                // (ties broken by file size - smaller inputs sorted first)
-                let mut best_idx = None;
-                let mut best_count = 0usize;
-
-                for (idx, edges) in edges_per_input.iter().enumerate() {
-                    if used[idx] { continue; }
-
-                    let new_coverage = edges.iter().filter(|e| uncovered.contains(e)).count();
-                    if new_coverage > best_count {
-                        best_count = new_coverage;
-                        best_idx = Some(idx);
-                    }
-                }
-
-                match best_idx {
-                    Some(idx) => {
-                        used[idx] = true;
-                        selected.push(idx);
-                        for edge in &edges_per_input[idx] {
-                            uncovered.remove(edge);
-                        }
-                    }
-                    None => break, // No more inputs can cover remaining edges
-                }
-            }
+            let cmin_result = crucible_fuzzer::cmin::greedy_set_cover(&edges_per_input);
+            let selected = cmin_result.selected;
 
             eprintln!("[CMIN] Selected {} inputs (reduced from {})",
                 selected.len(), edges_per_input.len());
 
             // Phase 3: Copy selected inputs to output directory
             if corpus_out != corpus_dir {
-                std::fs::create_dir_all(&corpus_out).ok();
+                std::fs::create_dir_all(&corpus_out)
+                    .unwrap_or_else(|e| panic!("[CMIN] Failed to create output directory {}: {}", corpus_out, e));
             }
 
             let mut copied = 0usize;
@@ -253,5 +229,77 @@ pub fn load_inputs_into_memory() -> proc_macro2::TokenStream {
             }
             inputs
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::format_ident;
+
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    #[test]
+    fn cmin_mode_has_greedy_set_cover() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
+        assert!(
+            output.contains("greedy_set_cover"),
+            "should use greedy set cover algorithm"
+        );
+        assert!(output.contains("cmin_mode"), "should check cmin_mode flag");
+        assert!(
+            output.contains("corpus_in_dir"),
+            "should require corpus input dir"
+        );
+    }
+
+    #[test]
+    fn cmin_mode_uses_exact_edge_tracking() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
+        assert!(
+            output.contains("cmin_edge_set_enable"),
+            "should enable exact edge tracking"
+        );
+        assert!(
+            output.contains("cmin_edge_set_take"),
+            "should take edge set after execution"
+        );
+    }
+
+    #[test]
+    fn cmin_mode_panics_on_bad_output_dir() {
+        let mod_name = format_ident!("__fuzz_mod");
+        let fixture = format_ident!("TestFixture");
+        let fn_name = format_ident!("test_fn");
+        let output = ts(cmin_mode(&mod_name, &fixture, &fn_name, &[], &[]));
+        assert!(
+            output.contains("Failed to create output directory"),
+            "should panic with descriptive message on mkdir failure"
+        );
+    }
+
+    #[test]
+    fn load_inputs_into_memory_uses_is_corpus_input() {
+        let output = ts(load_inputs_into_memory());
+        assert!(
+            output.contains("is_corpus_input"),
+            "should filter using is_corpus_input"
+        );
+        assert!(
+            output.contains("BytesInput"),
+            "should create BytesInput from files"
+        );
+        assert!(
+            output.contains("load_inputs_from_dir"),
+            "should define load_inputs_from_dir fn"
+        );
     }
 }

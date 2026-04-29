@@ -1,26 +1,21 @@
-//! Coverage tracking for the anchor-fuzz macro.
-//!
-//! This module contains all coverage-related code that gets generated into the
-//! fuzz harness runtime module. The code here is returned as `quote!` blocks
-//! that are embedded into the generated harness.
+//! Coverage tracking codegen: generates quote! blocks for the fuzz harness runtime module.
 
 use quote::quote;
-
-/// Constants for coverage map sizes
-/// Note: These are only used in generated code, not at macro compile time
-#[allow(dead_code)]
-pub const MAP_SIZE: usize = 1 << 16;
-#[allow(dead_code)]
-pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 16;   // 64KB = 512K bits for edges
-#[allow(dead_code)]
-pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 16; // 64KB = 512K bits for branches
 
 /// Generate the coverage state struct and related statics
 pub fn coverage_state_code() -> proc_macro2::TokenStream {
     quote! {
         pub const MAP_SIZE: usize = 1 << 16;
-        pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 16;    // 64KB = 512K bits for edges
-        pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 16;  // 64KB = 512K bits for branches
+        // R37 bump: 1<<16 → 1<<18 to reduce mix_hash-mod-bitmap collisions.
+        // At ~14k unique edges (phoenix-eternal), 256K bits → 5.3% pairwise
+        // collision rate (~1-2% undercount); 1M bits → 1.4% (~0.5% undercount).
+        // Cache: 256KB total vs 64KB — still L2-resident. Multi-worker cache-
+        // line ping-pong actually IMPROVES with a bigger bitmap (better hash
+        // spread → fewer workers hitting the same cache line), so no runtime
+        // cost. count_shared_bits popcount is O(bitmap_size) but runs once
+        // per export (~200μs instead of ~50μs), imperceptible.
+        pub const SHARED_EDGE_BITMAP_SIZE: usize = 1 << 18;    // 256KB = 2M bits (1M for edges, 1M for hitcount buckets)
+        pub const SHARED_BRANCH_BITMAP_SIZE: usize = 1 << 18;  // 256KB = 2M bits for branches
 
         /// Mix bits thoroughly using xxhash-style finalization
         /// This ensures uniform distribution even for clustered inputs like BPF PCs
@@ -34,20 +29,25 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             h
         }
 
-        /// Convert hitcount to AFL-style bucket (0-8)
-        /// Different buckets trigger different bits in shared bitmap for corpus growth
+        /// Convert hitcount to bucket for shared bitmap corpus growth.
+        /// 13 buckets (50% more granular than AFL's 9) to reduce coverage plateaus
+        /// in stateful fuzzing where action sequences hit the same edges at different depths.
         #[inline]
-        fn to_bucket(count: u8) -> u8 {
+        pub fn to_bucket(count: u8) -> u8 {
             match count {
                 0 => 0,
                 1 => 1,
                 2 => 2,
                 3 => 3,
-                4..=7 => 4,
-                8..=15 => 5,
-                16..=31 => 6,
-                32..=127 => 7,
-                _ => 8,
+                4..=5 => 4,
+                6..=7 => 5,
+                8..=11 => 6,
+                12..=15 => 7,
+                16..=23 => 8,
+                24..=31 => 9,
+                32..=63 => 10,
+                64..=127 => 11,
+                _ => 12,
             }
         }
 
@@ -76,55 +76,121 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
         // Coverage enabled flag (set by --coverage arg)
         pub static COVERAGE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-        // Multi-core mode: Track whether this iteration discovered new coverage in the shared bitmap.
-        // This is set by flush_bitmap_updates when fetch_or returns a value without the bit set.
+        // Multi-core mode: Track how many new coverage bits this iteration discovered
+        // in the shared bitmap. Incremented by flush_bitmap_updates/flush_local_bitmap_buffers
+        // when fetch_or returns a value without the bit set.
         // Reset at start of each iteration, checked by SharedBitmapFeedback.
         thread_local! {
-            pub static NEW_COVERAGE_THIS_ITERATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            pub static NEW_COVERAGE_BITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         }
 
         pub fn reset_new_coverage_flag() {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(false));
+            NEW_COVERAGE_BITS.with(|c| c.set(0));
         }
 
         pub fn found_new_coverage() -> bool {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.get())
+            NEW_COVERAGE_BITS.with(|c| c.get() > 0)
+        }
+
+        /// Return the number of new coverage bits discovered this iteration.
+        pub fn new_coverage_count() -> u32 {
+            NEW_COVERAGE_BITS.with(|c| c.get())
         }
 
         fn mark_new_coverage() {
-            NEW_COVERAGE_THIS_ITERATION.with(|f| f.set(true));
+            NEW_COVERAGE_BITS.with(|c| c.set(c.get() + 1));
         }
 
-        // Thread-local buffers for bitmap updates to reduce atomic contention in multi-core mode.
-        // Updates are accumulated locally and flushed periodically instead of on every transaction.
+        // Thread-local bitmaps that mirror the shared bitmaps for O(1) accumulation.
+        // Each byte position is directly indexed instead of appended to a Vec.
+        // Dirty position sets enable O(dirty) flush instead of O(bitmap_size) scan.
         thread_local! {
-            pub static LOCAL_EDGE_BUFFER: std::cell::RefCell<Vec<(usize, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
-            pub static LOCAL_BRANCH_BUFFER: std::cell::RefCell<Vec<(usize, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+            static LOCAL_EDGE_BITMAP: std::cell::RefCell<Vec<u8>> =
+                std::cell::RefCell::new(vec![0u8; SHARED_EDGE_BITMAP_SIZE]);
+            static LOCAL_BRANCH_BITMAP: std::cell::RefCell<Vec<u8>> =
+                std::cell::RefCell::new(vec![0u8; SHARED_BRANCH_BITMAP_SIZE]);
+            static LOCAL_EDGE_DIRTY: std::cell::RefCell<Vec<u32>> =
+                std::cell::RefCell::new(Vec::with_capacity(512));
+            static LOCAL_BRANCH_DIRTY: std::cell::RefCell<Vec<u32>> =
+                std::cell::RefCell::new(Vec::with_capacity(256));
         }
 
         /// Flush thread-local bitmap buffers to shared memory.
-        /// Called periodically from the harness (e.g., every 50 iterations) to reduce atomic contention.
+        /// Iterates only dirty positions — O(dirty) atomic ops, no merge step.
         pub fn flush_local_bitmap_buffers(shared_edge_ptr: *mut u8, shared_branch_ptr: *mut u8) {
-            LOCAL_EDGE_BUFFER.with(|buf| {
-                let mut buffer = buf.borrow_mut();
-                if !buffer.is_empty() {
-                    FuzzCallback::flush_bitmap_updates(shared_edge_ptr, &buffer, SHARED_EDGE_BITMAP_SIZE);
-                    buffer.clear();
-                }
+            LOCAL_EDGE_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                if dirty.is_empty() { return; }
+                LOCAL_EDGE_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    unsafe {
+                        for &pos in dirty.iter() {
+                            let pos = pos as usize;
+                            let mask = bm[pos];
+                            if mask != 0 {
+                                let byte_ptr = shared_edge_ptr.add(pos) as *const std::sync::atomic::AtomicU8;
+                                let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                                if (prev & mask) != mask {
+                                    mark_new_coverage();
+                                }
+                                bm[pos] = 0;
+                            }
+                        }
+                    }
+                });
+                dirty.clear();
             });
-            LOCAL_BRANCH_BUFFER.with(|buf| {
-                let mut buffer = buf.borrow_mut();
-                if !buffer.is_empty() {
-                    FuzzCallback::flush_bitmap_updates(shared_branch_ptr, &buffer, SHARED_BRANCH_BITMAP_SIZE);
-                    buffer.clear();
+            LOCAL_BRANCH_DIRTY.with(|dirty| {
+                let mut dirty = dirty.borrow_mut();
+                if dirty.is_empty() { return; }
+                LOCAL_BRANCH_BITMAP.with(|bm| {
+                    let mut bm = bm.borrow_mut();
+                    unsafe {
+                        for &pos in dirty.iter() {
+                            let pos = pos as usize;
+                            let mask = bm[pos];
+                            if mask != 0 {
+                                let byte_ptr = shared_branch_ptr.add(pos) as *const std::sync::atomic::AtomicU8;
+                                let prev = (*byte_ptr).fetch_or(mask, std::sync::atomic::Ordering::Relaxed);
+                                if (prev & mask) != mask {
+                                    mark_new_coverage();
+                                }
+                                bm[pos] = 0;
+                            }
+                        }
+                    }
+                });
+                dirty.clear();
+            });
+        }
+
+        // CMIN mode: exact edge tracking via HashSet.
+        // Tracks unique (pc, target_pc) pairs as u64 — the same metric as the
+        // normal fuzzing monitor's COVERAGE_STATE.edges. This is immune to both:
+        //  1. u8 wrapping in the AFL map (edges hit N*256 times become invisible)
+        //  2. AFL map index inflation from context-sensitivity (prev_location XOR
+        //     makes the same physical edge produce different map indices depending
+        //     on the preceding edge, inflating the count vs real unique edges)
+        thread_local! {
+            pub static CMIN_EDGE_SET: std::cell::RefCell<Option<crucible_test_context::FastHashSet<u64>>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Enable cmin edge tracking. Call before each input execution.
+        pub fn cmin_edge_set_enable() {
+            CMIN_EDGE_SET.with(|s| {
+                let mut s = s.borrow_mut();
+                if let Some(ref mut set) = *s {
+                    set.clear();
+                } else {
+                    *s = Some(crucible_test_context::FastHashSet::default());
                 }
             });
         }
 
-        /// Clear thread-local bitmap buffers without flushing (used when resetting for new iteration).
-        pub fn clear_local_bitmap_buffers() {
-            LOCAL_EDGE_BUFFER.with(|buf| buf.borrow_mut().clear());
-            LOCAL_BRANCH_BUFFER.with(|buf| buf.borrow_mut().clear());
+        /// Take the cmin edge set (returns and disables).
+        pub fn cmin_edge_set_take() -> Option<crucible_test_context::FastHashSet<u64>> {
+            CMIN_EDGE_SET.with(|s| s.borrow_mut().take())
         }
 
         // Force-accept mode for initial corpus loading
@@ -133,15 +199,17 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
             pub static FORCE_INTERESTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         }
 
-        pub fn set_force_interesting(value: bool) {
-            FORCE_INTERESTING.with(|f| f.set(value));
-        }
-
         pub fn is_force_interesting() -> bool {
             FORCE_INTERESTING.with(|f| f.get())
         }
 
-        // Runtime stats tracking
+        // Atomic mirror of COVERAGE_STATE.total_edges for lock-free reads in the
+        // stateful hot path. Updated in process_trace() whenever the Mutex-guarded
+        // total_edges changes. Stateful mode reads this instead of locking the Mutex
+        // twice per iteration per worker.
+        pub static TOTAL_EDGES_ATOMIC: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+
         pub static FUZZER_START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         pub static TOTAL_EXECUTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -159,6 +227,15 @@ pub fn coverage_state_code() -> proc_macro2::TokenStream {
 
         pub fn init_program_binaries(binaries: HashMap<u64, Vec<u8>>) {
             let _ = PROGRAM_BINARIES.set(binaries);
+        }
+
+        // Static storage for DWARF source maps (for source-level LCOV)
+        pub static DWARF_SOURCE_MAP: std::sync::OnceLock<
+            HashMap<u64, crucible_test_context::DwarfSourceMap>
+        > = std::sync::OnceLock::new();
+
+        pub fn init_dwarf_source_maps(maps: HashMap<u64, crucible_test_context::DwarfSourceMap>) {
+            let _ = DWARF_SOURCE_MAP.set(maps);
         }
     }
 }
@@ -188,6 +265,12 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                     shared_branch_bitmap: None,
                     skip_global_state: false,
                 }
+            }
+
+            /// Skip global COVERAGE_STATE updates (saves mutex lock overhead).
+            /// Used in cmin mode where global state is not needed.
+            pub fn set_skip_global_state(&mut self, skip: bool) {
+                self.skip_global_state = skip;
             }
 
             pub fn with_shared_memory(
@@ -359,6 +442,14 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                         buf[edge] = buf[edge].wrapping_add(1);
                     }
 
+                    // CMIN mode: record exact (pc, target_pc) pair — same metric
+                    // as COVERAGE_STATE.edges used by the normal fuzzing monitor.
+                    CMIN_EDGE_SET.with(|s| {
+                        if let Some(ref mut set) = *s.borrow_mut() {
+                            set.insert(edge_id);
+                        }
+                    });
+
                     // Multi-core mode: batch updates to shared bitmaps
                     // Edge bitmap is split into two halves:
                     // - First half (bits 0..256K): edge presence (counted for display)
@@ -407,16 +498,38 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                     }
                 }
 
-                // Multi-core mode: accumulate updates in thread-local buffers
-                // Buffers are flushed periodically from the harness to reduce atomic contention
+                // Multi-core mode: merge updates into thread-local bitmaps (O(1) per update)
+                // Dirty positions are tracked for O(dirty) flush later
                 if self.shared_edge_bitmap.is_some() {
-                    LOCAL_EDGE_BUFFER.with(|buf| {
-                        buf.borrow_mut().extend(edge_bitmap_updates.iter().cloned());
+                    LOCAL_EDGE_BITMAP.with(|bm| {
+                        let mut bm = bm.borrow_mut();
+                        LOCAL_EDGE_DIRTY.with(|dirty| {
+                            let mut dirty = dirty.borrow_mut();
+                            for &(byte_pos, mask) in &edge_bitmap_updates {
+                                if byte_pos < SHARED_EDGE_BITMAP_SIZE {
+                                    if bm[byte_pos] == 0 {
+                                        dirty.push(byte_pos as u32);
+                                    }
+                                    bm[byte_pos] |= mask;
+                                }
+                            }
+                        });
                     });
                 }
                 if self.shared_branch_bitmap.is_some() {
-                    LOCAL_BRANCH_BUFFER.with(|buf| {
-                        buf.borrow_mut().extend(branch_bitmap_updates.iter().cloned());
+                    LOCAL_BRANCH_BITMAP.with(|bm| {
+                        let mut bm = bm.borrow_mut();
+                        LOCAL_BRANCH_DIRTY.with(|dirty| {
+                            let mut dirty = dirty.borrow_mut();
+                            for &(byte_pos, mask) in &branch_bitmap_updates {
+                                if byte_pos < SHARED_BRANCH_BITMAP_SIZE {
+                                    if bm[byte_pos] == 0 {
+                                        dirty.push(byte_pos as u32);
+                                    }
+                                    bm[byte_pos] |= mask;
+                                }
+                            }
+                        });
                     });
                 }
 
@@ -432,7 +545,12 @@ pub fn fuzz_callback_code() -> proc_macro2::TokenStream {
                 let edge_set = state.edges.entry(program_hash).or_default();
                 let old_edge_count = edge_set.len();
                 edge_set.extend(&local_edges);
-                state.total_edges += edge_set.len() - old_edge_count;
+                let new_edges = edge_set.len() - old_edge_count;
+                state.total_edges += new_edges;
+                // Mirror to atomic for lock-free reads in stateful hot path
+                if new_edges > 0 {
+                    TOTAL_EDGES_ATOMIC.store(state.total_edges, std::sync::atomic::Ordering::Relaxed);
+                }
 
                 // Track branch PCs and update cached total
                 let branch_set = state.branch_pcs.entry(program_hash).or_default();
@@ -626,6 +744,7 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
             let program_binaries = PROGRAM_BINARIES.get();
             let edge_totals = PROGRAM_TOTALS.get();
             let instr_totals = PROGRAM_TOTAL_INSTRUCTIONS.get();
+            let dwarf_maps = DWARF_SOURCE_MAP.get();
 
             let mut programs_written = 0usize;
 
@@ -651,6 +770,27 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                     .and_then(|data| crucible_test_context::extract_functions(data))
                     .unwrap_or_default();
 
+                // Try source-level LCOV if DWARF map available
+                if let Some(source_map) = dwarf_maps.and_then(|m| m.get(&prog_hash)) {
+                    match crucible_test_context::generate_source_lcov(
+                        &mut writer,
+                        &hits,
+                        &outcomes,
+                        source_map,
+                        &functions,
+                    ) {
+                        Ok(n) => {
+                            eprintln!("[LCOV] Source-level coverage: {} source files", n);
+                            programs_written += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("[LCOV] Source-level failed, falling back: {}", e);
+                        }
+                    }
+                }
+
+                // Fallback: bytecode-level LCOV
                 let total_edges = edge_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
                 let total_branches = total_edges / 2;
                 let total_instructions = instr_totals.and_then(|t| t.get(&prog_hash).copied()).unwrap_or(0);
@@ -687,12 +827,25 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 branch_outcomes.values().map(|h| h.len()).sum::<usize>());
         }
 
-        /// Write coverage files every 5000 iterations when new coverage is discovered.
-        /// Uses iteration-based throttling (no syscalls) instead of wall-clock time.
+        /// Write coverage files periodically when new coverage is discovered.
+        /// Uses iteration-based pre-check (cheap modulo) and time-based throttle
+        /// (write at most every 10 seconds) for live coverage viewing.
         /// Note: Caller should check COVERAGE_ENABLED before calling this function
         pub fn maybe_write_coverage(exec_count: u64) {
-            // Iteration-based throttling: only check every 5000 iterations
-            if exec_count % 5000 != 0 {
+            // Rate limit: only check every 1000 iterations (cheap modulo, no syscall)
+            if exec_count % 1000 != 0 {
+                return;
+            }
+
+            // Time-based throttle: write at most every 10 seconds
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_WRITE_TIME: AtomicU64 = AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let last = LAST_WRITE_TIME.load(Ordering::Relaxed);
+            if now.saturating_sub(last) < 10 {
                 return;
             }
 
@@ -706,8 +859,91 @@ pub fn lcov_coverage_code() -> proc_macro2::TokenStream {
                 state.last_coverage_count = current_coverage_count;
                 drop(state); // Release lock before file I/O
 
+                LAST_WRITE_TIME.store(now, Ordering::Relaxed);
+
                 // Write LCOV when new coverage is found
                 write_lcov_coverage("coverage.lcov");
+            }
+        }
+    }
+}
+
+/// Generate the success pattern TLS and SuccessPatternFeedback for action-level success tracking
+pub fn success_pattern_code() -> proc_macro2::TokenStream {
+    quote! {
+        // Thread-local storage for the success pattern of the last harness iteration.
+        // Set by the harness wrapper after executing actions, read by SuccessPatternFeedback.
+        thread_local! {
+            static LAST_SUCCESS_PATTERN: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+
+        /// Set the success pattern for the current iteration (called from harness wrapper)
+        pub fn set_success_pattern(pattern: Vec<bool>) {
+            LAST_SUCCESS_PATTERN.with(|p| *p.borrow_mut() = pattern);
+        }
+
+        /// Get the success pattern from the current iteration (called by SuccessPatternFeedback)
+        pub fn get_success_pattern() -> Vec<bool> {
+            LAST_SUCCESS_PATTERN.with(|p| p.borrow().clone())
+        }
+
+        /// Feedback that attaches success pattern metadata to corpus entries.
+        ///
+        /// This feedback never causes corpus admission on its own (is_interesting returns false).
+        /// It only appends `SuccessPatternMetadata` to testcases that are admitted by other
+        /// feedbacks (e.g., MaxMapFeedback or SharedBitmapFeedback).
+        ///
+        /// The metadata is later read by `SuccessTrimStage` to strip failed actions.
+        pub struct SuccessPatternFeedback {
+            name: std::borrow::Cow<'static, str>,
+        }
+
+        impl SuccessPatternFeedback {
+            pub fn new() -> Self {
+                Self {
+                    name: std::borrow::Cow::Borrowed("success_pattern"),
+                }
+            }
+        }
+
+        impl<S> libafl::feedbacks::StateInitializer<S> for SuccessPatternFeedback {
+            fn init_state(&mut self, _state: &mut S) -> std::result::Result<(), libafl::Error> {
+                Ok(())
+            }
+        }
+
+        impl<EM, I, OT, S> libafl::feedbacks::Feedback<EM, I, OT, S> for SuccessPatternFeedback {
+            fn is_interesting(
+                &mut self,
+                _state: &mut S,
+                _manager: &mut EM,
+                _input: &I,
+                _observers: &OT,
+                _exit_kind: &libafl::prelude::ExitKind,
+            ) -> std::result::Result<bool, libafl::Error> {
+                // Never causes corpus admission on its own
+                Ok(false)
+            }
+
+            fn append_metadata(
+                &mut self,
+                _state: &mut S,
+                _manager: &mut EM,
+                _observers: &OT,
+                testcase: &mut libafl::corpus::Testcase<I>,
+            ) -> std::result::Result<(), libafl::Error> {
+                use libafl::HasMetadata;
+                let pattern = get_success_pattern();
+                if !pattern.is_empty() {
+                    testcase.add_metadata(crucible_fuzzer::SuccessPatternMetadata { pattern });
+                }
+                Ok(())
+            }
+        }
+
+        impl libafl_bolts::Named for SuccessPatternFeedback {
+            fn name(&self) -> &std::borrow::Cow<'static, str> {
+                &self.name
             }
         }
     }
@@ -720,6 +956,7 @@ pub fn all_coverage_code() -> proc_macro2::TokenStream {
     let callback_impl = invocation_callback_impl_code();
     let feedback_code = shared_bitmap_feedback_code();
     let lcov_code = lcov_coverage_code();
+    let success_pattern = success_pattern_code();
 
     quote! {
         #state_code
@@ -727,5 +964,309 @@ pub fn all_coverage_code() -> proc_macro2::TokenStream {
         #callback_impl
         #feedback_code
         #lcov_code
+        #success_pattern
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string()
+    }
+
+    #[test]
+    fn coverage_state_has_map_size() {
+        let output = ts(coverage_state_code());
+        assert!(output.contains("MAP_SIZE"), "should define MAP_SIZE");
+        assert!(
+            output.contains("SHARED_EDGE_BITMAP_SIZE"),
+            "should define shared edge bitmap size"
+        );
+        assert!(
+            output.contains("SHARED_BRANCH_BITMAP_SIZE"),
+            "should define shared branch bitmap size"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_coverage_struct() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("CoverageState"),
+            "should define CoverageState struct"
+        );
+        assert!(
+            output.contains("COVERAGE_STATE"),
+            "should define COVERAGE_STATE static"
+        );
+        assert!(
+            output.contains("COVERAGE_ENABLED"),
+            "should define COVERAGE_ENABLED flag"
+        );
+    }
+
+    #[test]
+    fn coverage_state_no_dead_code() {
+        let output = ts(coverage_state_code());
+        assert!(
+            !output.contains("clear_local_bitmap_buffers"),
+            "clear_local_bitmap_buffers should be removed"
+        );
+        assert!(
+            !output.contains("set_force_interesting"),
+            "set_force_interesting should be removed"
+        );
+        assert!(
+            !output.contains("TOTAL_ACTIONS"),
+            "TOTAL_ACTIONS should be removed"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_flush_buffers() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("flush_local_bitmap_buffers"),
+            "should keep flush_local_bitmap_buffers"
+        );
+        assert!(
+            output.contains("is_force_interesting"),
+            "should keep is_force_interesting"
+        );
+        assert!(
+            output.contains("TOTAL_EXECUTIONS"),
+            "should keep TOTAL_EXECUTIONS"
+        );
+        assert!(
+            output.contains("FUZZER_START_TIME"),
+            "should keep FUZZER_START_TIME"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_cmin_edge_set() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("CMIN_EDGE_SET"),
+            "should define CMIN_EDGE_SET"
+        );
+        assert!(
+            output.contains("cmin_edge_set_enable"),
+            "should define cmin_edge_set_enable"
+        );
+        assert!(
+            output.contains("cmin_edge_set_take"),
+            "should define cmin_edge_set_take"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_total_edges_atomic() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("TOTAL_EDGES_ATOMIC"),
+            "should define TOTAL_EDGES_ATOMIC"
+        );
+    }
+
+    #[test]
+    fn fuzz_callback_has_process_trace() {
+        let output = ts(fuzz_callback_code());
+        assert!(
+            output.contains("FuzzCallback"),
+            "should define FuzzCallback struct"
+        );
+        assert!(
+            output.contains("process_trace"),
+            "should have process_trace method"
+        );
+        assert!(
+            output.contains("count_shared_bits"),
+            "should have count_shared_bits method"
+        );
+    }
+
+    #[test]
+    fn fuzz_callback_has_shared_memory() {
+        let output = ts(fuzz_callback_code());
+        assert!(
+            output.contains("with_shared_memory"),
+            "should have with_shared_memory constructor"
+        );
+        assert!(
+            output.contains("shared_edge_bitmap"),
+            "should track shared edge bitmap"
+        );
+        assert!(
+            output.contains("shared_branch_bitmap"),
+            "should track shared branch bitmap"
+        );
+    }
+
+    #[test]
+    fn invocation_callback_impl_filters_branches() {
+        let output = ts(invocation_callback_impl_code());
+        assert!(
+            output.contains("InvocationInspectCallback"),
+            "should implement InvocationInspectCallback"
+        );
+        assert!(
+            output.contains("register_trace"),
+            "should use register trace"
+        );
+        assert!(
+            output.contains("BPF_JMP"),
+            "should filter for JMP instructions"
+        );
+    }
+
+    #[test]
+    fn shared_bitmap_feedback_checks_new_coverage() {
+        let output = ts(shared_bitmap_feedback_code());
+        assert!(
+            output.contains("SharedBitmapFeedback"),
+            "should define SharedBitmapFeedback"
+        );
+        assert!(
+            output.contains("found_new_coverage"),
+            "should check found_new_coverage"
+        );
+        assert!(
+            output.contains("is_force_interesting"),
+            "should check force interesting flag"
+        );
+    }
+
+    #[test]
+    fn lcov_code_has_write_functions() {
+        let output = ts(lcov_coverage_code());
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should define write_lcov_coverage"
+        );
+        assert!(
+            output.contains("maybe_write_coverage"),
+            "should define maybe_write_coverage"
+        );
+        assert!(
+            output.contains("generate_source_lcov"),
+            "should try source-level LCOV"
+        );
+        assert!(
+            output.contains("generate_bytecode_lcov"),
+            "should fall back to bytecode LCOV"
+        );
+    }
+
+    #[test]
+    fn success_pattern_has_feedback() {
+        let output = ts(success_pattern_code());
+        assert!(
+            output.contains("SuccessPatternFeedback"),
+            "should define SuccessPatternFeedback"
+        );
+        assert!(
+            output.contains("set_success_pattern"),
+            "should define set_success_pattern"
+        );
+        assert!(
+            output.contains("get_success_pattern"),
+            "should define get_success_pattern"
+        );
+        assert!(
+            output.contains("append_metadata"),
+            "should implement append_metadata"
+        );
+    }
+
+    #[test]
+    fn all_coverage_code_includes_everything() {
+        let output = ts(all_coverage_code());
+        assert!(
+            output.contains("CoverageState"),
+            "should include coverage state"
+        );
+        assert!(output.contains("FuzzCallback"), "should include callback");
+        assert!(
+            output.contains("SharedBitmapFeedback"),
+            "should include feedback"
+        );
+        assert!(
+            output.contains("write_lcov_coverage"),
+            "should include LCOV"
+        );
+        assert!(
+            output.contains("SuccessPatternFeedback"),
+            "should include success pattern"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_new_coverage_tracking() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("NEW_COVERAGE_BITS"),
+            "should define NEW_COVERAGE_BITS TLS"
+        );
+        assert!(
+            output.contains("reset_new_coverage_flag"),
+            "should define reset function"
+        );
+        assert!(
+            output.contains("found_new_coverage"),
+            "should define found_new_coverage check"
+        );
+        assert!(
+            output.contains("new_coverage_count"),
+            "should define new_coverage_count"
+        );
+        assert!(
+            output.contains("mark_new_coverage"),
+            "should define mark_new_coverage"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_program_totals() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("PROGRAM_TOTALS"),
+            "should define PROGRAM_TOTALS"
+        );
+        assert!(
+            output.contains("PROGRAM_TOTAL_INSTRUCTIONS"),
+            "should define instruction totals"
+        );
+        assert!(
+            output.contains("PROGRAM_BINARIES"),
+            "should define program binaries storage"
+        );
+        assert!(
+            output.contains("DWARF_SOURCE_MAP"),
+            "should define DWARF source map storage"
+        );
+        assert!(
+            output.contains("init_program_totals"),
+            "should define init function"
+        );
+        assert!(
+            output.contains("init_dwarf_source_maps"),
+            "should define DWARF init"
+        );
+    }
+
+    #[test]
+    fn coverage_state_has_to_bucket() {
+        let output = ts(coverage_state_code());
+        assert!(
+            output.contains("to_bucket"),
+            "should define to_bucket function"
+        );
+        assert!(
+            output.contains("mix_hash"),
+            "should define mix_hash function"
+        );
     }
 }
