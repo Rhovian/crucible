@@ -3,12 +3,13 @@ name = "crucible-invariant-macro"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+description = "Invariant-test attribute macro for crucible-fuzzer"
 
 [dependencies]
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-crucible-macro-utils = { path = "../crucible-macro-utils" }
+crucible-macro-utils = { path = "../crucible-macro-utils", version = "0.1.0" }
 
 [lib]
 proc-macro = true
