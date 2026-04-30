@@ -3,6 +3,7 @@ name = "crucible-macro-utils"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+description = "Shared utilities for crucible-fuzzer proc-macros"
 
 [lib]
 

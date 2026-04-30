@@ -3,6 +3,7 @@ name = "crucible-test-context"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
+description = "LiteSVM-backed test context used by crucible-fuzzer"
 
 [features]
 default = []
