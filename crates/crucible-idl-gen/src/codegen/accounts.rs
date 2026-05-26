@@ -1,8 +1,27 @@
 use std::collections::HashMap;
 
-use anchor_lang_idl::types::{Idl, IdlInstructionAccountItem};
+use anchor_lang_idl::types::{Idl, IdlInstructionAccount, IdlInstructionAccountItem};
 use heck::{ToSnakeCase, ToUpperCamelCase};
 use quote::{format_ident, quote};
+
+/// Recursively flatten composite accounts, yielding every `Single` in IDL order.
+///
+/// Anchor's composite accounts (`#[derive(Accounts)]` structs embedded in another
+/// `Accounts` struct) appear in the IDL as nested `IdlInstructionAccounts`. Both
+/// Anchor's TS client and `anchor-client` flatten them to a single field list,
+/// dropping the composite wrapper's name.
+fn flatten_accounts(items: &[IdlInstructionAccountItem]) -> Vec<&IdlInstructionAccount> {
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            IdlInstructionAccountItem::Single(s) => out.push(s),
+            IdlInstructionAccountItem::Composite(c) => {
+                out.extend(flatten_accounts(&c.accounts));
+            }
+        }
+    }
+    out
+}
 
 /// Generate account context structs for building transactions.
 ///
@@ -18,14 +37,15 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
     let account_structs = idl.instructions.iter().map(|ix| {
         let name = format_ident!("{}", ix.name.to_upper_camel_case());
 
+        // Flatten any composite accounts so we see a single flat list of Singles.
+        let flat_accounts = flatten_accounts(&ix.accounts);
+
         // Track how many times each name appears (for duplicate detection)
         // Only count non-fixed-address accounts for struct fields.
         let mut name_counts: HashMap<String, usize> = HashMap::new();
-        for acc in &ix.accounts {
-            if let IdlInstructionAccountItem::Single(single) = acc {
-                if single.address.is_none() {
-                    *name_counts.entry(single.name.clone()).or_insert(0) += 1;
-                }
+        for single in &flat_accounts {
+            if single.address.is_none() {
+                *name_counts.entry(single.name.clone()).or_insert(0) += 1;
             }
         }
 
@@ -33,122 +53,108 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
         let mut name_indices: HashMap<String, usize> = HashMap::new();
 
         // Generate fields from accounts (skip fixed-address accounts)
-        let fields = ix.accounts.iter().filter_map(|acc| {
-            match acc {
-                IdlInstructionAccountItem::Single(single) => {
-                    // Skip fixed-address accounts — they're auto-filled
-                    if single.address.is_some() {
-                        return None;
-                    }
-
-                    let base_name = &single.name;
-                    let count = name_counts.get(base_name).unwrap_or(&1);
-                    let idx = name_indices.entry(base_name.clone()).or_insert(0);
-
-                    // Only add suffix if there are duplicates
-                    let field_name = if *count > 1 {
-                        format_ident!("{}_{}", base_name.to_snake_case(), idx)
-                    } else {
-                        format_ident!("{}", base_name.to_snake_case())
-                    };
-                    *idx += 1;
-
-                    // All account fields are Pubkey for the client struct
-                    let field_type = if single.optional {
-                        quote! { Option<Pubkey> }
-                    } else {
-                        quote! { Pubkey }
-                    };
-
-                    Some(quote! { pub #field_name: #field_type })
-                }
-                IdlInstructionAccountItem::Composite(_) => {
-                    // Skip composite accounts for now
-                    // TODO: Handle nested account structs
-                    None
-                }
+        let fields = flat_accounts.iter().filter_map(|single| {
+            // Skip fixed-address accounts — they're auto-filled
+            if single.address.is_some() {
+                return None;
             }
+
+            let base_name = &single.name;
+            let count = name_counts.get(base_name).unwrap_or(&1);
+            let idx = name_indices.entry(base_name.clone()).or_insert(0);
+
+            // Only add suffix if there are duplicates
+            let field_name = if *count > 1 {
+                format_ident!("{}_{}", base_name.to_snake_case(), idx)
+            } else {
+                format_ident!("{}", base_name.to_snake_case())
+            };
+            *idx += 1;
+
+            // All account fields are Pubkey for the client struct
+            let field_type = if single.optional {
+                quote! { Option<Pubkey> }
+            } else {
+                quote! { Pubkey }
+            };
+
+            Some(quote! { pub #field_name: #field_type })
         });
 
         // Reset indices for ToAccountMetas generation
         let mut name_indices: HashMap<String, usize> = HashMap::new();
 
         // Generate ToAccountMetas implementation
-        let to_account_metas = ix.accounts.iter().filter_map(|acc| {
-            match acc {
-                IdlInstructionAccountItem::Single(single) => {
-                    let is_signer = single.signer;
-                    let is_writable = single.writable;
+        let to_account_metas = flat_accounts.iter().map(|single| {
+            let is_signer = single.signer;
+            let is_writable = single.writable;
 
-                    if let Some(address) = &single.address {
-                        // Fixed-address account: decode base58 and insert literal
-                        let address_bytes = match bs58::decode(address).into_vec() {
-                            Ok(bytes) if bytes.len() == 32 => bytes,
-                            _ => {
-                                // Fallback: emit a runtime decode (shouldn't happen for valid IDLs)
-                                let addr_str = address.clone();
-                                return Some(quote! {
-                                    account_metas.push(AccountMeta {
-                                        pubkey: #addr_str.parse::<Pubkey>().unwrap(),
-                                        is_signer: #is_signer,
-                                        is_writable: #is_writable,
-                                    });
-                                });
-                            }
-                        };
-
-                        // Register address constant
-                        let const_name = single.name.to_snake_case().to_uppercase();
-                        if !seen_addresses.contains_key(address) {
-                            seen_addresses.insert(address.clone(), const_name.clone());
-                            let const_ident = format_ident!("{}", const_name);
-                            address_constants.push(quote! {
-                                pub static #const_ident: Pubkey = Pubkey::new_from_array([#(#address_bytes,)*]);
-                            });
-                        }
-
-                        Some(quote! {
+            if let Some(address) = &single.address {
+                // Fixed-address account: decode base58 and insert literal
+                let address_bytes = match bs58::decode(address).into_vec() {
+                    Ok(bytes) if bytes.len() == 32 => bytes,
+                    _ => {
+                        // Fallback: emit a runtime decode (shouldn't happen for valid IDLs)
+                        let addr_str = address.clone();
+                        return quote! {
                             account_metas.push(AccountMeta {
-                                pubkey: Pubkey::new_from_array([#(#address_bytes,)*]),
+                                pubkey: #addr_str.parse::<Pubkey>().unwrap(),
                                 is_signer: #is_signer,
                                 is_writable: #is_writable,
                             });
-                        })
-                    } else {
-                        // User-provided account
-                        let base_name = &single.name;
-                        let count = name_counts.get(base_name).unwrap_or(&1);
-                        let idx = name_indices.entry(base_name.clone()).or_insert(0);
-
-                        let field_name = if *count > 1 {
-                            format_ident!("{}_{}", base_name.to_snake_case(), idx)
-                        } else {
-                            format_ident!("{}", base_name.to_snake_case())
                         };
-                        *idx += 1;
+                    }
+                };
 
-                        if single.optional {
-                            Some(quote! {
-                                if let Some(key) = &self.#field_name {
-                                    account_metas.push(AccountMeta {
-                                        pubkey: *key,
-                                        is_signer: #is_signer,
-                                        is_writable: #is_writable,
-                                    });
-                                }
-                            })
-                        } else {
-                            Some(quote! {
-                                account_metas.push(AccountMeta {
-                                    pubkey: self.#field_name,
-                                    is_signer: #is_signer,
-                                    is_writable: #is_writable,
-                                });
-                            })
+                // Register address constant
+                let const_name = single.name.to_snake_case().to_uppercase();
+                if !seen_addresses.contains_key(address) {
+                    seen_addresses.insert(address.clone(), const_name.clone());
+                    let const_ident = format_ident!("{}", const_name);
+                    address_constants.push(quote! {
+                        pub static #const_ident: Pubkey = Pubkey::new_from_array([#(#address_bytes,)*]);
+                    });
+                }
+
+                quote! {
+                    account_metas.push(AccountMeta {
+                        pubkey: Pubkey::new_from_array([#(#address_bytes,)*]),
+                        is_signer: #is_signer,
+                        is_writable: #is_writable,
+                    });
+                }
+            } else {
+                // User-provided account
+                let base_name = &single.name;
+                let count = name_counts.get(base_name).unwrap_or(&1);
+                let idx = name_indices.entry(base_name.clone()).or_insert(0);
+
+                let field_name = if *count > 1 {
+                    format_ident!("{}_{}", base_name.to_snake_case(), idx)
+                } else {
+                    format_ident!("{}", base_name.to_snake_case())
+                };
+                *idx += 1;
+
+                if single.optional {
+                    quote! {
+                        if let Some(key) = &self.#field_name {
+                            account_metas.push(AccountMeta {
+                                pubkey: *key,
+                                is_signer: #is_signer,
+                                is_writable: #is_writable,
+                            });
                         }
                     }
+                } else {
+                    quote! {
+                        account_metas.push(AccountMeta {
+                            pubkey: self.#field_name,
+                            is_signer: #is_signer,
+                            is_writable: #is_writable,
+                        });
+                    }
                 }
-                IdlInstructionAccountItem::Composite(_) => None,
             }
         });
 
@@ -202,8 +208,16 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
 mod tests {
     use super::*;
     use anchor_lang_idl::types::{
-        Idl, IdlInstruction, IdlInstructionAccount, IdlInstructionAccountItem, IdlMetadata,
+        Idl, IdlInstruction, IdlInstructionAccount, IdlInstructionAccountItem,
+        IdlInstructionAccounts, IdlMetadata,
     };
+
+    fn make_composite(name: &str, accounts: Vec<IdlInstructionAccountItem>) -> IdlInstructionAccountItem {
+        IdlInstructionAccountItem::Composite(IdlInstructionAccounts {
+            name: name.to_string(),
+            accounts,
+        })
+    }
 
     fn make_account(name: &str) -> IdlInstructionAccountItem {
         IdlInstructionAccountItem::Single(IdlInstructionAccount {
@@ -744,6 +758,110 @@ mod tests {
     // -----------------------------------------------------------------------
     // Account signer/writable flags: verify flags match IDL
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_composite_accounts_flattened() {
+        // Composite "marketTokens" contains base_mint + quote_mint;
+        // surrounded by top-level admin + config. All four flatten to one struct.
+        let idl = make_idl(vec![IdlInstruction {
+            name: "DepositLiquidity".to_string(),
+            docs: vec![],
+            discriminator: vec![],
+            accounts: vec![
+                make_signer_account("admin"),
+                make_composite(
+                    "marketTokens",
+                    vec![make_account("baseMint"), make_account("quoteMint")],
+                ),
+                make_account("config"),
+            ],
+            args: vec![],
+            returns: None,
+        }]);
+
+        let generated = generate(&idl).to_string();
+
+        // All four accounts should appear as flat fields
+        assert!(generated.contains("pub admin : Pubkey"), "admin field missing");
+        assert!(
+            generated.contains("pub base_mint : Pubkey"),
+            "base_mint field missing — composite was not flattened"
+        );
+        assert!(
+            generated.contains("pub quote_mint : Pubkey"),
+            "quote_mint field missing — composite was not flattened"
+        );
+        assert!(generated.contains("pub config : Pubkey"), "config field missing");
+
+        // Order in to_account_metas: admin, baseMint, quoteMint, config
+        let order = extract_account_order(&generated);
+        assert_eq!(
+            order,
+            vec!["admin", "base_mint", "quote_mint", "config"],
+            "composite-inner accounts should expand in-place preserving IDL order"
+        );
+    }
+
+    #[test]
+    fn test_nested_composite_accounts_flattened() {
+        // Composite containing a composite.
+        let idl = make_idl(vec![IdlInstruction {
+            name: "NestedIx".to_string(),
+            docs: vec![],
+            discriminator: vec![],
+            accounts: vec![
+                make_account("outer"),
+                make_composite(
+                    "level1",
+                    vec![
+                        make_account("a"),
+                        make_composite("level2", vec![make_account("b"), make_account("c")]),
+                        make_account("d"),
+                    ],
+                ),
+                make_account("trailing"),
+            ],
+            args: vec![],
+            returns: None,
+        }]);
+
+        let generated = generate(&idl).to_string();
+        let order = extract_account_order(&generated);
+
+        assert_eq!(
+            order,
+            vec!["outer", "a", "b", "c", "d", "trailing"],
+            "nested composites should fully flatten in IDL order"
+        );
+    }
+
+    #[test]
+    fn test_composite_name_collision_gets_suffix() {
+        // Top-level `mint` plus composite-inner `mint` — both should land on the
+        // flattened struct and the existing dedup logic should suffix them.
+        let idl = make_idl(vec![IdlInstruction {
+            name: "CollideIx".to_string(),
+            docs: vec![],
+            discriminator: vec![],
+            accounts: vec![
+                make_account("mint"),
+                make_composite("inner", vec![make_account("mint")]),
+            ],
+            args: vec![],
+            returns: None,
+        }]);
+
+        let generated = generate(&idl).to_string();
+
+        assert!(
+            generated.contains("mint_0"),
+            "first mint should get _0 suffix"
+        );
+        assert!(
+            generated.contains("mint_1"),
+            "composite-inner mint should get _1 suffix"
+        );
+    }
 
     #[test]
     fn test_account_flags_preserved() {
