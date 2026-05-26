@@ -212,7 +212,10 @@ mod tests {
         IdlInstructionAccounts, IdlMetadata,
     };
 
-    fn make_composite(name: &str, accounts: Vec<IdlInstructionAccountItem>) -> IdlInstructionAccountItem {
+    fn make_composite(
+        name: &str,
+        accounts: Vec<IdlInstructionAccountItem>,
+    ) -> IdlInstructionAccountItem {
         IdlInstructionAccountItem::Composite(IdlInstructionAccounts {
             name: name.to_string(),
             accounts,
@@ -782,7 +785,10 @@ mod tests {
         let generated = generate(&idl).to_string();
 
         // All four accounts should appear as flat fields
-        assert!(generated.contains("pub admin : Pubkey"), "admin field missing");
+        assert!(
+            generated.contains("pub admin : Pubkey"),
+            "admin field missing"
+        );
         assert!(
             generated.contains("pub base_mint : Pubkey"),
             "base_mint field missing — composite was not flattened"
@@ -791,7 +797,10 @@ mod tests {
             generated.contains("pub quote_mint : Pubkey"),
             "quote_mint field missing — composite was not flattened"
         );
-        assert!(generated.contains("pub config : Pubkey"), "config field missing");
+        assert!(
+            generated.contains("pub config : Pubkey"),
+            "config field missing"
+        );
 
         // Order in to_account_metas: admin, baseMint, quoteMint, config
         let order = extract_account_order(&generated);
@@ -860,6 +869,83 @@ mod tests {
         assert!(
             generated.contains("mint_1"),
             "composite-inner mint should get _1 suffix"
+        );
+    }
+
+    #[test]
+    fn test_composite_preserves_flags() {
+        let idl = make_idl(vec![IdlInstruction {
+            name: "CompositeFlags".to_string(),
+            docs: vec![],
+            discriminator: vec![],
+            accounts: vec![
+                make_account("plain"),
+                make_composite(
+                    "inner",
+                    vec![
+                        // writable + signer inside composite
+                        IdlInstructionAccountItem::Single(IdlInstructionAccount {
+                            name: "vault".to_string(),
+                            docs: vec![],
+                            writable: true,
+                            signer: false,
+                            optional: false,
+                            address: None,
+                            pda: None,
+                            relations: vec![],
+                        }),
+                        make_optional_account("optionalReserve"),
+                        make_fixed_account("rent", "SysvarRent111111111111111111111111111111111"),
+                    ],
+                ),
+            ],
+            args: vec![],
+            returns: None,
+        }]);
+
+        let generated = generate(&idl).to_string();
+
+        // vault should be a writable struct field (not signer)
+        assert!(
+            generated.contains("pub vault : Pubkey"),
+            "writable account inside composite should appear as struct field"
+        );
+
+        // optional account inside composite should be Option<Pubkey>
+        assert!(
+            generated.contains("pub optional_reserve : Option < Pubkey >"),
+            "optional account inside composite should generate Option<Pubkey>"
+        );
+
+        // fixed-address account inside composite should NOT be a struct field
+        assert!(
+            !generated.contains("pub rent"),
+            "fixed-address inside composite should be auto-filled, not a struct field"
+        );
+
+        // Verify flags in to_account_metas
+        let meta_fn_start = generated
+            .find("fn to_account_metas")
+            .expect("should have to_account_metas");
+        let meta_body = &generated[meta_fn_start..];
+        let pushes: Vec<&str> = meta_body.split("account_metas . push").skip(1).collect();
+
+        // plain, vault, optional_reserve (if-let), rent (fixed) = 4 pushes
+        assert_eq!(
+            pushes.len(),
+            4,
+            "should have 4 account pushes, got {}",
+            pushes.len()
+        );
+
+        // vault (index 1) should be writable, not signer
+        assert!(
+            pushes[1].contains("is_writable : true"),
+            "vault should be writable"
+        );
+        assert!(
+            pushes[1].contains("is_signer : false"),
+            "vault should not be signer"
         );
     }
 
