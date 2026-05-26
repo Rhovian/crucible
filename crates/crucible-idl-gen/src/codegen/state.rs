@@ -4,6 +4,7 @@ use anchor_lang_idl::types::{
 use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
 
+use super::generics::{generic_params_decl, generic_params_use, type_generic_bounds};
 use super::idl_type_to_tokens;
 
 /// Generate state types for deserializing on-chain account data
@@ -30,6 +31,11 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
 fn generate_account_struct(acc: &IdlAccount, type_def: &IdlTypeDef) -> proc_macro2::TokenStream {
     let name = format_ident!("{}", type_def.name);
     let discriminator = &acc.discriminator;
+    let generics = &type_def.generics;
+    let decl = generic_params_decl(generics);
+    let use_ = generic_params_use(generics);
+    let pod_bound = type_generic_bounds(generics, quote! { bytemuck::Pod });
+    let zeroable_bound = type_generic_bounds(generics, quote! { bytemuck::Zeroable });
 
     // Check if this is a zero-copy type using the IDL's repr field (not heuristics)
     let is_zero_copy = matches!(&type_def.repr, Some(IdlRepr::C(_)));
@@ -46,32 +52,32 @@ fn generate_account_struct(acc: &IdlAccount, type_def: &IdlTypeDef) -> proc_macr
                 quote! {
                     #[derive(Clone, Copy)]
                     #[repr(C)]
-                    pub struct #name {
+                    pub struct #name #decl {
                         #fields_tokens
                     }
 
-                    impl #name {
+                    impl #decl #name #use_ {
                         pub const DISCRIMINATOR: &'static [u8] = &[#(#discriminator),*];
                         pub const DISCRIMINATOR_LEN: usize = #discriminator_len;
                     }
 
-                    unsafe impl bytemuck::Pod for #name {}
-                    unsafe impl bytemuck::Zeroable for #name {}
+                    unsafe impl #decl bytemuck::Pod for #name #use_ #pod_bound {}
+                    unsafe impl #decl bytemuck::Zeroable for #name #use_ #zeroable_bound {}
                 }
             } else {
                 // Regular account with borsh serialization
                 quote! {
                     #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
-                    pub struct #name {
+                    pub struct #name #decl {
                         #fields_tokens
                     }
 
-                    impl #name {
+                    impl #decl #name #use_ {
                         pub const DISCRIMINATOR: &'static [u8] = &[#(#discriminator),*];
                         pub const DISCRIMINATOR_LEN: usize = #discriminator_len;
                     }
 
-                    impl anchor_lang::Discriminator for #name {
+                    impl #decl anchor_lang::Discriminator for #name #use_ {
                         const DISCRIMINATOR: &'static [u8] = &[#(#discriminator),*];
                     }
                 }
@@ -100,7 +106,7 @@ fn generate_account_struct(acc: &IdlAccount, type_def: &IdlTypeDef) -> proc_macr
 
             quote! {
                 #[derive(Clone, Copy, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)]
-                pub enum #name {
+                pub enum #name #decl {
                     #(#variants_tokens),*
                 }
             }
@@ -108,7 +114,7 @@ fn generate_account_struct(acc: &IdlAccount, type_def: &IdlTypeDef) -> proc_macr
         IdlTypeDefTy::Type { alias } => {
             let alias_ty = idl_type_to_tokens(alias);
             quote! {
-                pub type #name = #alias_ty;
+                pub type #name #decl = #alias_ty;
             }
         }
     }

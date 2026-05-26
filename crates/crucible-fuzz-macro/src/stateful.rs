@@ -1120,8 +1120,9 @@ fn stateful_singlecore_body(
                 );
                 if state_pool.is_novel_crash(input_hash) {
                     crashes_found += 1;
-                    println!("[FUZZ_FINDING] summary:{}", msg);
-                    eprintln!("\n[FUZZ_FINDING] at iteration {}: {}", iteration, msg);
+                    let crash_id = format!("crash_{:016x}", input_hash);
+                    println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
+                    eprintln!("\n[FUZZ_FINDING] {} at iteration {}: {}", crash_id, iteration, msg);
                     // Print full action chain from root to violation.
                     // Include ALL actions from the current chain (chain_len may be >1 with splice).
                     let parent_descs = state_pool.reconstruct_action_descriptions(state_idx);
@@ -1886,8 +1887,9 @@ fn stateful_multicore_body(
                             // Crash disk I/O outside write lock (Fix 3)
                             for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
                                 let total = parent_descs.len() + current_descs.len();
-                                println!("[FUZZ_FINDING] summary:{}", msg);
-                                eprintln!("\n[FUZZ_FINDING] {}", msg);
+                                let crash_id = format!("crash_{:016x}", vh);
+                                println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
+                                eprintln!("\n[FUZZ_FINDING] {}: {}", crash_id, msg);
                                 eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                                 for (i, desc) in parent_descs.iter().enumerate() {
                                     eprintln!("  {}. {}", i + 1, desc);
@@ -2503,8 +2505,9 @@ fn stateful_multicore_body(
                     // Crash disk I/O outside write lock (Fix 3)
                     for (msg, parent_descs, current_descs, vh, crash_bytes) in __crash_outputs {
                         let total = parent_descs.len() + current_descs.len();
-                        println!("[FUZZ_FINDING] summary:{}", msg);
-                        eprintln!("\n[FUZZ_FINDING] {}", msg);
+                        let crash_id = format!("crash_{:016x}", vh);
+                        println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
+                        eprintln!("\n[FUZZ_FINDING] {}: {}", crash_id, msg);
                         eprintln!("=== CRASH SEQUENCE ({} actions) ===", total);
                         for (i, desc) in parent_descs.iter().enumerate() {
                             eprintln!("  {}. {}", i + 1, desc);

@@ -16,6 +16,14 @@ pub fn generate(idl: &Idl) -> proc_macro2::TokenStream {
             // Look up the type definition
             let type_def = idl.types.iter().find(|t| t.name == acc.name)?;
 
+            // Skip generic typedefs: the schema registry maps a concrete type name to
+            // a concrete `bytemuck::from_bytes::<T>` cast. A generic typedef has no
+            // single layout and is never an Anchor `#[account]` anyway — the registry
+            // would emit `state::Foo` (no generics) which wouldn't resolve.
+            if !type_def.generics.is_empty() {
+                return None;
+            }
+
             // Only handle zero-copy (repr(C)) struct accounts with named fields
             let is_zero_copy = matches!(&type_def.repr, Some(IdlRepr::C(_)));
             if !is_zero_copy {

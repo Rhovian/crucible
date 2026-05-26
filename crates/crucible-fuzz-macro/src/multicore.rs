@@ -703,10 +703,11 @@ pub fn multicore_mode(
                     }
 
                     if let Some(msg) = crucible_test_context::take_violation() {
-                        println!("[FUZZ_FINDING] summary:{}", msg);
-                        eprintln!("[FUZZ_FINDING] {}", msg);
-                        crucible_test_context::print_action_sequence();
                         let input_hash = hash_std(slice);
+                        let crash_id = format!("crash_{:016x}", input_hash);
+                        println!("[FUZZ_FINDING] crash:{} summary:{}", crash_id, msg);
+                        eprintln!("[FUZZ_FINDING] {}: {}", crash_id, msg);
+                        crucible_test_context::print_action_sequence();
                         crucible_test_context::write_crash_metadata(&crash_dir_clone, input_hash, Some(seed), slice);
 
                         // Stop on first crash if requested

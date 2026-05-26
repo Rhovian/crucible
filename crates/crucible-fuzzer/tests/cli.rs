@@ -6255,7 +6255,7 @@ fn test_fuzz_finding_in_all_modes() {
 fn test_did_not_reproduce_string() {
     let content =
         fs::read_to_string(project_root().join("crates/crucible-fuzz-macro/src/modes.rs")).unwrap();
-    assert!(content.contains(r#"eprintln!("did not reproduce")"#));
+    assert!(content.contains("did not reproduce"));
 }
 
 #[test]

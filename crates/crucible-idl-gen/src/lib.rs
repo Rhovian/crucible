@@ -1964,6 +1964,65 @@ mod tests {
     fn test_syntax_valid_shank_candy_guard() {
         assert_valid_rust_syntax("shank_candy_guard.json");
     }
+    #[test]
+    fn test_syntax_valid_generics_basic() {
+        assert_valid_rust_syntax("generics_basic.json");
+    }
+
+    /// Wormhole NTT — a real-world Anchor program with generic typedefs. The
+    /// original generics-bearing bug-reproducer.
+    ///
+    /// Source: built locally with `anchor build` (anchor-cli 0.29) against
+    /// wormhole-foundation/native-token-transfers commit (HEAD as of fetch),
+    /// then converted to Anchor 0.30+ spec via `anchor idl convert -p
+    /// NTtAaoDJhkeHeaVUHnyhwbPNAN6WgBpHkHBTc6d7vLK`. The convert tool currently
+    /// drops typedef-level generics declarations (`anchor-lang-idl 0.1.x`
+    /// `convert.rs:403` hardcodes `generics: Default::default()`), so this
+    /// fixture's `ValidatedTransceiverMessage<A>`, `NttManagerMessage<A>`, and
+    /// `TransceiverMessageData<A>` generics were restored by hand to match what
+    /// a fresh Anchor 0.30+ build would produce.
+    ///
+    /// This is the canonical real-world regression: if codegen ever drops
+    /// generics again, this test fails before `cannot find type A` reaches a
+    /// user's harness.
+    #[test]
+    fn test_syntax_valid_native_token_transfers() {
+        assert_valid_rust_syntax("native_token_transfers.json");
+    }
+
+    /// Verify the emitted code for the generics fixture actually declares
+    /// the generic parameters on the typedefs (regression for the original
+    /// `cannot find type A in this scope` bug).
+    #[test]
+    fn test_generics_basic_emits_param_declarations() {
+        let tokens = run_full_pipeline_tokens("generics_basic.json").to_string();
+
+        assert!(
+            tokens.contains("pub struct GenericStruct < A >"),
+            "GenericStruct should declare <A>; got: {tokens}"
+        );
+        assert!(
+            tokens.contains("pub struct GenericTupleStruct < T >"),
+            "GenericTupleStruct should declare <T>"
+        );
+        assert!(
+            tokens.contains("pub enum GenericEnum < A , B >"),
+            "GenericEnum should declare <A, B>"
+        );
+        assert!(
+            tokens.contains("pub type GenericAlias < A >"),
+            "GenericAlias should declare <A>"
+        );
+        // Use-site instantiations should carry generic args.
+        assert!(
+            tokens.contains("GenericStruct < u64 >"),
+            "ConcreteUser should reference GenericStruct<u64>"
+        );
+        assert!(
+            tokens.contains("GenericEnum < u32 , u64 >"),
+            "ConcreteUser should reference GenericEnum<u32, u64>"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // InstructionData: verify data() method emits discriminator + payload
