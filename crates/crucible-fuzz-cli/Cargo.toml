@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "CLI for Crucible - Solana smart contract fuzzing framework"
 
+[lib]
+name = "crucible_fuzz_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "crucible"
 path = "src/main.rs"

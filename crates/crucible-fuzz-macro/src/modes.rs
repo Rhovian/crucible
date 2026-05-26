@@ -218,6 +218,9 @@ pub fn replay_mode(
             // Reset iteration counter
             crucible_test_context::set_current_iteration(0);
 
+            // Compute crash_id from input_bytes BEFORE the deser block moves it
+            let crash_id = format!("crash_{:016x}", libafl_bolts::hash_std(&input_bytes));
+
             // Parse input and run test
             #deser_block
 
@@ -232,13 +235,13 @@ pub fn replay_mode(
             let violation_msg = crucible_test_context::take_violation();
 
             if let Some(msg) = violation_msg {
-                println!("[FUZZ_FINDING] reproduces:true summary:{}", msg);
+                println!("[FUZZ_FINDING] crash:{} reproduces:true summary:{}", crash_id, msg);
                 crucible_test_context::print_action_sequence();
-                eprintln!("[INVARIANT] {}", msg);
+                eprintln!("[INVARIANT] {}: {}", crash_id, msg);
                 std::process::exit(1);
             } else {
-                println!("[FUZZ_FINDING] reproduces:false summary:did not reproduce");
-                eprintln!("did not reproduce");
+                println!("[FUZZ_FINDING] crash:{} reproduces:false summary:did not reproduce", crash_id);
+                eprintln!("{}: did not reproduce", crash_id);
                 crucible_test_context::print_action_sequence();
                 std::process::exit(0);
             }
