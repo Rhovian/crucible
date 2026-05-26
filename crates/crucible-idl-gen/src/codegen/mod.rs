@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod discriminators;
+pub(crate) mod generics;
 pub mod instructions;
 pub mod schemas;
 pub mod state;
@@ -8,14 +9,18 @@ pub mod types;
 use anchor_lang_idl::types::{Idl, IdlArrayLen};
 use quote::quote;
 
-/// Convert IdlArrayLen enum to a usize value
+use self::generics::{array_len_to_tokens, generic_args_to_tokens};
+
+/// Convert IdlArrayLen enum to a usize value.
+///
+/// Note: this only handles `IdlArrayLen::Value(_)` and panics on `Generic`.
+/// For generic-aware emission inside `idl_type_to_tokens`, use
+/// `generics::array_len_to_tokens` directly.
 pub fn array_len_to_usize(len: &IdlArrayLen) -> usize {
     match len {
         IdlArrayLen::Value(n) => *n,
         IdlArrayLen::Generic(name) => {
-            // For generic lengths, we can't know at compile time
-            // Fall back to a reasonable default or panic
-            panic!("Generic array length '{name}' not supported in codegen")
+            panic!("Generic array length '{name}' not supported by array_len_to_usize; use array_len_to_tokens instead")
         }
     }
 }
@@ -65,12 +70,13 @@ pub fn idl_type_to_tokens(ty: &anchor_lang_idl::types::IdlType) -> proc_macro2::
         }
         IdlType::Array(inner, len) => {
             let inner_ty = idl_type_to_tokens(inner);
-            let len_value = array_len_to_usize(len);
-            quote! { [#inner_ty; #len_value] }
+            let len_tokens = array_len_to_tokens(len);
+            quote! { [#inner_ty; #len_tokens] }
         }
-        IdlType::Defined { name, generics: _ } => {
+        IdlType::Defined { name, generics } => {
             let ident = quote::format_ident!("{}", name);
-            quote! { #ident }
+            let args = generic_args_to_tokens(generics);
+            quote! { #ident #args }
         }
         IdlType::Generic(name) => {
             let ident = quote::format_ident!("{}", name);
@@ -179,6 +185,44 @@ mod tests {
         })
         .to_string();
         assert_eq!(output, "MyCustomType");
+    }
+
+    #[test]
+    fn test_idl_type_to_tokens_defined_with_generics() {
+        use anchor_lang_idl::types::IdlGenericArg;
+
+        let output = idl_type_to_tokens(&IdlType::Defined {
+            name: "Foo".to_string(),
+            generics: vec![IdlGenericArg::Type { ty: IdlType::U64 }],
+        })
+        .to_string();
+        assert_eq!(output, "Foo < u64 >");
+
+        let output = idl_type_to_tokens(&IdlType::Defined {
+            name: "Foo".to_string(),
+            generics: vec![
+                IdlGenericArg::Type { ty: IdlType::U64 },
+                IdlGenericArg::Const { value: "8".into() },
+            ],
+        })
+        .to_string();
+        assert_eq!(output, "Foo < u64 , 8 >");
+    }
+
+    #[test]
+    fn test_idl_type_to_tokens_generic_ref() {
+        let output = idl_type_to_tokens(&IdlType::Generic("A".to_string())).to_string();
+        assert_eq!(output, "A");
+    }
+
+    #[test]
+    fn test_idl_type_to_tokens_array_with_generic_len() {
+        let output = idl_type_to_tokens(&IdlType::Array(
+            Box::new(IdlType::U8),
+            IdlArrayLen::Generic("N".to_string()),
+        ))
+        .to_string();
+        assert_eq!(output, "[u8 ; N]");
     }
 
     #[test]

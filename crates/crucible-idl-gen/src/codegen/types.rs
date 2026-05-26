@@ -1,7 +1,10 @@
-use anchor_lang_idl::types::{Idl, IdlDefinedFields, IdlRepr, IdlTypeDef, IdlTypeDefTy};
+use anchor_lang_idl::types::{
+    Idl, IdlDefinedFields, IdlRepr, IdlTypeDef, IdlTypeDefGeneric, IdlTypeDefTy,
+};
 use heck::ToUpperCamelCase;
 use quote::{format_ident, quote};
 
+use super::generics::{generic_params_decl, generic_params_use, type_generic_bounds};
 use super::{array_len_to_usize, idl_type_to_tokens};
 
 /// Generate custom type definitions from IDL types section
@@ -27,6 +30,7 @@ fn generate_type_def(
     use_bincode: bool,
 ) -> proc_macro2::TokenStream {
     let name = format_ident!("{}", typedef.name);
+    let generics = &typedef.generics;
 
     // Check if this is a zero-copy type (repr: C)
     let is_zero_copy = matches!(&typedef.repr, Some(IdlRepr::C(_)));
@@ -34,16 +38,19 @@ fn generate_type_def(
     match &typedef.ty {
         IdlTypeDefTy::Struct { fields } => {
             if is_zero_copy {
-                generate_zero_copy_struct(&name, fields, &typedef.name)
+                generate_zero_copy_struct(&name, fields, &typedef.name, generics)
             } else {
-                generate_struct(&name, fields, &typedef.name, all_types)
+                generate_struct(&name, fields, &typedef.name, all_types, generics)
             }
         }
-        IdlTypeDefTy::Enum { variants } => generate_enum(&name, variants, all_types, use_bincode),
+        IdlTypeDefTy::Enum { variants } => {
+            generate_enum(&name, variants, all_types, use_bincode, generics)
+        }
         IdlTypeDefTy::Type { alias } => {
             let alias_ty = idl_type_to_tokens(alias);
+            let decl = generic_params_decl(generics);
             quote! {
-                pub type #name = #alias_ty;
+                pub type #name #decl = #alias_ty;
             }
         }
     }
@@ -54,7 +61,9 @@ fn generate_struct(
     fields: &Option<IdlDefinedFields>,
     type_name: &str,
     all_types: &[IdlTypeDef],
+    generics: &[IdlTypeDefGeneric],
 ) -> proc_macro2::TokenStream {
+    let decl = generic_params_decl(generics);
     let fields_tokens = match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
             let field_tokens = named_fields.iter().map(|f| {
@@ -75,7 +84,7 @@ fn generate_struct(
             };
             return quote! {
                 #derives
-                pub struct #name(#(pub #field_tokens),*);
+                pub struct #name #decl (#(pub #field_tokens),*);
             };
         }
         None => quote! {},
@@ -127,14 +136,14 @@ fn generate_struct(
 
     // Generate manual Default impl if we can't derive it
     let default_impl = if !can_derive_default {
-        generate_manual_default(name, fields)
+        generate_manual_default(name, fields, generics)
     } else {
         quote! {}
     };
 
     quote! {
         #derives
-        pub struct #name {
+        pub struct #name #decl {
             #fields_tokens
         }
 
@@ -149,7 +158,12 @@ fn generate_zero_copy_struct(
     name: &syn::Ident,
     fields: &Option<IdlDefinedFields>,
     type_name: &str,
+    generics: &[IdlTypeDefGeneric],
 ) -> proc_macro2::TokenStream {
+    let decl = generic_params_decl(generics);
+    let use_ = generic_params_use(generics);
+    let pod_bound = type_generic_bounds(generics, quote! { bytemuck::Pod });
+    let zeroable_bound = type_generic_bounds(generics, quote! { bytemuck::Zeroable });
     let fields_tokens = match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
             let field_tokens = named_fields.iter().map(|f| {
@@ -165,10 +179,10 @@ fn generate_zero_copy_struct(
             return quote! {
                 #[derive(Clone, Copy, Default, AnchorSerialize, AnchorDeserialize, PartialEq, Eq)]
                 #[repr(C)]
-                pub struct #name(#(pub #field_tokens),*);
+                pub struct #name #decl (#(pub #field_tokens),*);
 
-                unsafe impl bytemuck::Pod for #name {}
-                unsafe impl bytemuck::Zeroable for #name {}
+                unsafe impl #decl bytemuck::Pod for #name #use_ #pod_bound {}
+                unsafe impl #decl bytemuck::Zeroable for #name #use_ #zeroable_bound {}
             };
         }
         None => quote! {},
@@ -195,7 +209,7 @@ fn generate_zero_copy_struct(
 
     // Generate manual Default impl if we can't derive it
     let default_impl = if !can_derive_default {
-        generate_manual_default(name, fields)
+        generate_manual_default(name, fields, generics)
     } else {
         quote! {}
     };
@@ -203,12 +217,12 @@ fn generate_zero_copy_struct(
     quote! {
         #derives
         #[repr(C)]
-        pub struct #name {
+        pub struct #name #decl {
             #fields_tokens
         }
 
-        unsafe impl bytemuck::Pod for #name {}
-        unsafe impl bytemuck::Zeroable for #name {}
+        unsafe impl #decl bytemuck::Pod for #name #use_ #pod_bound {}
+        unsafe impl #decl bytemuck::Zeroable for #name #use_ #zeroable_bound {}
 
         #default_impl
         #extra_impls
@@ -220,7 +234,9 @@ fn generate_enum(
     variants: &[anchor_lang_idl::types::IdlEnumVariant],
     all_types: &[IdlTypeDef],
     use_bincode: bool,
+    generics: &[IdlTypeDefGeneric],
 ) -> proc_macro2::TokenStream {
+    let decl = generic_params_decl(generics);
     // Check if all variants are unit variants (no fields)
     let all_unit = variants.iter().all(|v| v.fields.is_none());
 
@@ -228,7 +244,7 @@ fn generate_enum(
     // (bincode encodes enum variant indices as u32 LE, borsh uses u8)
     // Enums with fields (like StakeState) are account state types — keep borsh for those
     if use_bincode && all_unit {
-        return generate_bincode_unit_enum(name, variants);
+        return generate_bincode_unit_enum(name, variants, generics);
     }
 
     // Check if first variant is a unit variant (no fields) - required for #[default] attribute
@@ -307,7 +323,7 @@ fn generate_enum(
 
     // Generate manual Default impl for enums where first variant has fields
     let manual_default = if !can_derive_default && !variants.is_empty() {
-        generate_enum_manual_default(name, &variants[0])
+        generate_enum_manual_default(name, &variants[0], generics)
     } else {
         quote! {}
     };
@@ -315,7 +331,7 @@ fn generate_enum(
     quote! {
         #derives
         #[repr(u8)]
-        pub enum #name {
+        pub enum #name #decl {
             #(#variants_tokens),*
         }
 
@@ -331,7 +347,10 @@ fn generate_enum(
 fn generate_bincode_unit_enum(
     name: &syn::Ident,
     variants: &[anchor_lang_idl::types::IdlEnumVariant],
+    generics: &[IdlTypeDefGeneric],
 ) -> proc_macro2::TokenStream {
+    let decl = generic_params_decl(generics);
+    let use_ = generic_params_use(generics);
     let variant_idents: Vec<_> = variants
         .iter()
         .map(|v| format_ident!("{}", v.name.to_upper_camel_case()))
@@ -363,11 +382,11 @@ fn generate_bincode_unit_enum(
     quote! {
         #[derive(Clone, Copy, Default, PartialEq, Eq)]
         #[repr(u32)]
-        pub enum #name {
+        pub enum #name #decl {
             #(#variant_defs),*
         }
 
-        impl AnchorSerialize for #name {
+        impl #decl AnchorSerialize for #name #use_ {
             fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
                 let idx: u32 = match self {
                     #(#ser_arms),*
@@ -376,7 +395,7 @@ fn generate_bincode_unit_enum(
             }
         }
 
-        impl AnchorDeserialize for #name {
+        impl #decl AnchorDeserialize for #name #use_ {
             fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
                 let mut buf = [0u8; 4];
                 reader.read_exact(&mut buf)?;
@@ -397,8 +416,12 @@ fn generate_bincode_unit_enum(
 fn generate_enum_manual_default(
     name: &syn::Ident,
     first_variant: &anchor_lang_idl::types::IdlEnumVariant,
+    generics: &[IdlTypeDefGeneric],
 ) -> proc_macro2::TokenStream {
     let variant_name = format_ident!("{}", first_variant.name.to_upper_camel_case());
+    let decl = generic_params_decl(generics);
+    let use_ = generic_params_use(generics);
+    let default_bound = type_generic_bounds(generics, quote! { Default });
 
     match &first_variant.fields {
         Some(IdlDefinedFields::Named(fields)) => {
@@ -408,7 +431,7 @@ fn generate_enum_manual_default(
                 quote! { #field_name: Default::default() }
             });
             quote! {
-                impl Default for #name {
+                impl #decl Default for #name #use_ #default_bound {
                     fn default() -> Self {
                         Self::#variant_name {
                             #(#field_defaults),*
@@ -420,7 +443,7 @@ fn generate_enum_manual_default(
         Some(IdlDefinedFields::Tuple(types)) => {
             let defaults = types.iter().map(|_| quote! { Default::default() });
             quote! {
-                impl Default for #name {
+                impl #decl Default for #name #use_ #default_bound {
                     fn default() -> Self {
                         Self::#variant_name(#(#defaults),*)
                     }
@@ -441,7 +464,7 @@ fn can_derive_default_fields(fields: &IdlDefinedFields) -> bool {
 
 /// Check if a type can derive Default
 fn can_type_derive_default(ty: &anchor_lang_idl::types::IdlType) -> bool {
-    use anchor_lang_idl::types::IdlType;
+    use anchor_lang_idl::types::{IdlArrayLen, IdlType};
 
     match ty {
         // Primitives with Default
@@ -463,14 +486,15 @@ fn can_type_derive_default(ty: &anchor_lang_idl::types::IdlType) -> bool {
         IdlType::Bytes => true,
         IdlType::Vec(_) => true,
         IdlType::Option(_) => true,
-        // Arrays only have Default for len <= 32
-        IdlType::Array(inner, len) => {
-            let len_val = super::array_len_to_usize(len);
-            len_val <= 32 && can_type_derive_default(inner)
-        }
+        // Arrays only have Default for len <= 32 (when len is known at codegen time)
+        IdlType::Array(inner, IdlArrayLen::Value(n)) => *n <= 32 && can_type_derive_default(inner),
+        // Generic-length arrays — can't determine at codegen time, be conservative
+        IdlType::Array(_, IdlArrayLen::Generic(_)) => false,
         // We can't know if user types implement Default, be conservative
         // Users can manually implement Default if needed
         IdlType::Defined { .. } => false,
+        // Type-param references — depend on the user's instantiation, be conservative
+        IdlType::Generic(_) => false,
         _ => false,
     }
 }
@@ -511,8 +535,21 @@ fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlType
         IdlType::Option(inner) => can_type_derive_eq(inner, all_types),
         IdlType::Array(inner, _) => can_type_derive_eq(inner, all_types),
         // Look up defined types to check their fields recursively
-        IdlType::Defined { name, .. } => {
+        IdlType::Defined {
+            name,
+            generics: use_site_generics,
+        } => {
+            // If the use-site instantiates with generic args we can't see through the
+            // typedef body to know what the concrete field types resolve to — conservative.
+            if !use_site_generics.is_empty() {
+                return false;
+            }
             if let Some(typedef) = all_types.iter().find(|t| &t.name == name) {
+                // If the typedef itself declares generics, the body contains `Generic(_)`
+                // references whose concrete types we can't know — conservative.
+                if !typedef.generics.is_empty() {
+                    return false;
+                }
                 match &typedef.ty {
                     IdlTypeDefTy::Struct { fields } => fields
                         .as_ref()
@@ -525,10 +562,13 @@ fn can_type_derive_eq(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlType
                     IdlTypeDefTy::Type { alias } => can_type_derive_eq(alias, all_types),
                 }
             } else {
-                true // Unknown type, assume Eq
+                // Unknown type — be conservative (previous behaviour was unsound: returned true)
+                false
             }
         }
-        _ => true,
+        // Type-param references — depend on the user's instantiation, be conservative
+        IdlType::Generic(_) => false,
+        _ => false,
     }
 }
 
@@ -565,8 +605,20 @@ fn is_copy_type(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlTypeDef]) 
         IdlType::Array(inner, _) => is_copy_type(inner, all_types),
         IdlType::Option(inner) => is_copy_type(inner, all_types),
         // Defined types - look up in IDL and recursively check their fields
-        IdlType::Defined { name, .. } => {
+        IdlType::Defined {
+            name,
+            generics: use_site_generics,
+        } => {
+            // If the use-site instantiates with generic args, we'd need full substitution
+            // through the typedef body to know if the result is Copy — conservative.
+            if !use_site_generics.is_empty() {
+                return false;
+            }
             if let Some(typedef) = all_types.iter().find(|t| &t.name == name) {
+                // Typedef with its own generic params has unknown field types — conservative.
+                if !typedef.generics.is_empty() {
+                    return false;
+                }
                 match &typedef.ty {
                     IdlTypeDefTy::Struct { fields } => should_derive_copy(fields, all_types),
                     IdlTypeDefTy::Enum { variants } => {
@@ -583,6 +635,8 @@ fn is_copy_type(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlTypeDef]) 
                 false
             }
         }
+        // Type-param references — depend on the user's instantiation, be conservative
+        IdlType::Generic(_) => false,
         // String and Vec are not Copy
         IdlType::String | IdlType::Bytes | IdlType::Vec(_) => false,
         _ => false,
@@ -593,6 +647,7 @@ fn is_copy_type(ty: &anchor_lang_idl::types::IdlType, all_types: &[IdlTypeDef]) 
 fn generate_manual_default(
     name: &syn::Ident,
     fields: &Option<IdlDefinedFields>,
+    generics: &[IdlTypeDefGeneric],
 ) -> proc_macro2::TokenStream {
     let field_defaults = match fields {
         Some(IdlDefinedFields::Named(named_fields)) => {
@@ -609,8 +664,12 @@ fn generate_manual_default(
         }
     };
 
+    let decl = generic_params_decl(generics);
+    let use_ = generic_params_use(generics);
+    let default_bound = type_generic_bounds(generics, quote! { Default });
+
     quote! {
-        impl Default for #name {
+        impl #decl Default for #name #use_ #default_bound {
             fn default() -> Self {
                 Self {
                     #field_defaults

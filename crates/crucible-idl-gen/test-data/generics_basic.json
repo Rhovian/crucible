@@ -1,0 +1,151 @@
+{
+  "address": "11111111111111111111111111111111",
+  "metadata": {
+    "name": "generics_basic",
+    "version": "0.1.0",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "noop",
+      "discriminator": [1, 2, 3, 4, 5, 6, 7, 8],
+      "accounts": [],
+      "args": []
+    },
+    {
+      "name": "with_concrete_arg",
+      "discriminator": [9, 10, 11, 12, 13, 14, 15, 16],
+      "accounts": [],
+      "args": [
+        {
+          "name": "value",
+          "type": {
+            "defined": {
+              "name": "GenericStruct",
+              "generics": [
+                {
+                  "kind": "type",
+                  "type": "u64"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [],
+  "events": [],
+  "errors": [],
+  "types": [
+    {
+      "name": "GenericStruct",
+      "generics": [
+        { "kind": "type", "name": "A" }
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "value", "type": { "generic": "A" } },
+          { "name": "tag", "type": "u64" }
+        ]
+      }
+    },
+    {
+      "name": "GenericTupleStruct",
+      "generics": [
+        { "kind": "type", "name": "T" }
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "generic": "T" },
+          "u32"
+        ]
+      }
+    },
+    {
+      "name": "GenericEnum",
+      "generics": [
+        { "kind": "type", "name": "A" },
+        { "kind": "type", "name": "B" }
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          { "name": "Unit" },
+          {
+            "name": "Left",
+            "fields": [{ "generic": "A" }]
+          },
+          {
+            "name": "Pair",
+            "fields": [
+              { "name": "first", "type": { "generic": "A" } },
+              { "name": "second", "type": { "generic": "B" } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "GenericAlias",
+      "generics": [
+        { "kind": "type", "name": "A" }
+      ],
+      "type": {
+        "kind": "type",
+        "alias": {
+          "defined": {
+            "name": "GenericStruct",
+            "generics": [
+              { "kind": "type", "type": { "generic": "A" } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "ConcreteUser",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "wrap_u64",
+            "type": {
+              "defined": {
+                "name": "GenericStruct",
+                "generics": [
+                  { "kind": "type", "type": "u64" }
+                ]
+              }
+            }
+          },
+          {
+            "name": "wrap_pubkey",
+            "type": {
+              "defined": {
+                "name": "GenericStruct",
+                "generics": [
+                  { "kind": "type", "type": "pubkey" }
+                ]
+              }
+            }
+          },
+          {
+            "name": "either",
+            "type": {
+              "defined": {
+                "name": "GenericEnum",
+                "generics": [
+                  { "kind": "type", "type": "u32" },
+                  { "kind": "type", "type": "u64" }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
