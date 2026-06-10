@@ -584,6 +584,7 @@ pub fn invocation_callback_impl_code() -> proc_macro2::TokenStream {
         impl crucible_test_context::InvocationInspectCallback for FuzzCallback {
             fn before_invocation(
                 &self,
+                _svm: &crucible_test_context::litesvm::LiteSVM,
                 _tx: &crucible_test_context::fuzz_types::SanitizedTransaction,
                 _program_indices: &[crucible_test_context::fuzz_types::IndexOfAccount],
                 _invoke_context: &crucible_test_context::fuzz_types::InvokeContext,
@@ -593,6 +594,7 @@ pub fn invocation_callback_impl_code() -> proc_macro2::TokenStream {
 
             fn after_invocation(
                 &self,
+                _svm: &crucible_test_context::litesvm::LiteSVM,
                 invoke_context: &crucible_test_context::fuzz_types::InvokeContext,
                 register_tracing_enabled: bool,
             ) {

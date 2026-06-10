@@ -1375,6 +1375,7 @@ pub struct EmptyInvocationCallback;
 impl InvocationInspectCallback for EmptyInvocationCallback {
     fn before_invocation(
         &self,
+        _svm: &LiteSVM,
         _tx: &solana_transaction::sanitized::SanitizedTransaction,
         _program_indices: &[solana_transaction_context::IndexOfAccount],
         _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
@@ -1383,6 +1384,7 @@ impl InvocationInspectCallback for EmptyInvocationCallback {
 
     fn after_invocation(
         &self,
+        _svm: &LiteSVM,
         _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
         _register_tracing_enabled: bool,
     ) {
