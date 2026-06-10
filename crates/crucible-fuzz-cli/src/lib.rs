@@ -1960,6 +1960,18 @@ fn fuzz_cmin(
 ///
 /// Also tries hyphen/underscore conversion and auto-detects if only one harness exists.
 fn resolve_fuzz_dir(root: &Path, program_name: &str) -> Result<PathBuf> {
+    // Absolutize first: the resolved dir is used both as the fuzz binary's
+    // current_dir and to locate that binary, so a relative `-C <dir>` would be
+    // applied twice (cwd=<dir> + <dir>/target/... → <dir>/<dir>/...). Anchoring
+    // to cwd here keeps every returned path absolute for all callers.
+    let root_abs;
+    let root = if root.is_absolute() {
+        root
+    } else {
+        root_abs = current_dir()?.join(root);
+        root_abs.as_path()
+    };
+
     // If root itself is a harness dir (has [package], not a bare virtual workspace), use it directly.
     if root.join("Cargo.toml").exists() && root.join("src").exists() {
         let content = fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
